@@ -26,7 +26,7 @@ small-business use free; sell it at scale, pay the licensor.
 
 - **Backend:** Rust (Tauri 2), tokio async, SQLite (traces, memory)
 - **Frontend:** SvelteKit + Svelte 5, desktop-first
-- **Memory:** vendored `hillock-core` (in progress — see docs/PUBLIC_CUT_AUDIT.md B4)
+- **Memory:** vendored `hillock-core` at `crates/hillock-core`
 - **Agent connectivity:** OpenAI-compatible / Anthropic / local endpoints,
   MCP servers, Agent SDK sidecar bridge
 
@@ -36,6 +36,7 @@ small-business use free; sell it at scale, pay the licensor.
 |---|---|
 | `app/src-tauri/` | Rust backend: runtime, providers, tools, persistence |
 | `app/src/` | SvelteKit frontend |
+| `crates/hillock-core/` | Vendored memory engine crate, scrubbed for the public cut |
 | `docs/` | Public documentation + `PUBLIC_CUT_AUDIT.md` + `DECISIONS.md` |
 | `skills/` | Skill registry content |
 | `scripts/` | Dev scripts (public-safe subset) |
@@ -54,8 +55,8 @@ npm run check              # frontend type/lint check
 
 - Proper front page landed (README v2). Fresh-history public cut initialized from the private predecessor's main
   (provenance recorded outside this repo). Scrub audit:
-  `docs/PUBLIC_CUT_AUDIT.md` — five blocker classes, B1/B3/B5 resolved,
-  B2 (public docs) in progress, B4 (vendor memory engine) in progress.
+  `docs/PUBLIC_CUT_AUDIT.md` — B1/B3/B4/B5 resolved, B2 public docs in
+  progress, B6 dependency audit remains.
 - Backend tests: 859 passing. Frontend check: clean. Memory-system
   representation verified against hillock-core source (rotation.rs).
 - Repo is **private until the maintainer explicitly flips it public.**

@@ -51,7 +51,7 @@ libc = "0.2"
 serde_yaml = "0.9"
 glob-match = "0.2"
 fastembed = "5"
-hillock-core = { path = "../../../hillock/hillock-core" }
+hillock-core = { path = "../../crates/hillock-core" }
 tiktoken-rs = "0.6"
 dashmap = "6"
 moka = { version = "0.12", features = ["future"] }

@@ -41,20 +41,18 @@ research-harness cut, documented with rationale. Each entry: KEEP / GENERALIZE /
 8. **docs/specs/** — per-file triage (Helix + me, checklist to follow):
    specs referencing house agents/sessions exclude; generic architecture
    specs keep with a scrub pass.
-9. **Memory/Hillock integration** — KEEP (path-dep on hillock repo — decision
-   needed: vendor a snapshot, pin a public hillock, or feature-flag it OFF
-   for the public cut. My lean: feature-flag OFF + document the interface;
-   hillock's own publishability is a separate Mark decision.)
+9. **Memory/Hillock integration** — **KEEP + VENDOR**: Hillock is part of
+   Holt. Ship a scrubbed in-tree `hillock-core` snapshot with empty memory
+   data rather than a private path dependency, public git dependency, or stub.
 10. **Provider key handling** — mechanism is keychain-ref based (clean);
     Helix's scrub audit owns verification.
 
 ## Framing (README skeleton, for the repo)
 
 - "Holt is a research harness for multi-agent orchestration — the public,
-  identity-free cut of a private system. The code calls it Meridian; the den
-  calls it Holt." Position: mechanisms for lanes, personas-as-archetypes,
-  memory interfaces, tool approval tiers, session persistence. NOT a product,
-  NOT supported, NOT the private system's history.
+  identity-free cut of a private system." Position: mechanisms for lanes,
+  personas-as-archetypes, memory interfaces, tool approval tiers, session
+  persistence. NOT a product, NOT supported, NOT the private system's history.
 
 ## Discuss-later ledger (innovations → possible main-repo backports)
 

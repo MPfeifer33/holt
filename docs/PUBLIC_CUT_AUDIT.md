@@ -71,6 +71,10 @@ untouched.
   - Hillock memory fallback namespace;
   - bundled Agent SDK MCP bridge.
 - Neutralized several resident-specific tests and examples.
+- Vendored a scrubbed `hillock-core` snapshot into `crates/hillock-core/` and
+  repointed Holt's backend dependency to the in-tree crate.
+- Removed predecessor config/keychain migration behavior so Holt starts from
+  its own config directory and keychain service only.
 
 Quarantine path:
 
@@ -163,22 +167,38 @@ Public direction:
 
 ### B4: `hillock-core` is still a path dependency
 
-Current private path dependency:
+Status: resolved for the public seed.
+
+Completed:
+
+- copied reusable `hillock-core/src` into `crates/hillock-core/`;
+- converted the crate manifest from workspace-inherited dependencies to
+  explicit standalone dependencies;
+- pointed the Tauri backend at `../../crates/hillock-core`;
+- did not copy memory databases, generated caches, the old Hillock workspace,
+  or private integration tests;
+- scrubbed house-specific comments and test fixture IDs inside the vendored
+  crate.
+
+Former private path dependency:
 
 ```toml
 hillock-core = { path = "../../../hillock/hillock-core" }
 ```
 
-Public direction:
+Current public-cut dependency:
 
-- Decide whether Holt vendors a public Hillock crate, uses a git dependency, or
-  stubs memory behind a feature flag until Hillock is public-ready.
+```toml
+hillock-core = { path = "../../crates/hillock-core" }
+```
 
 ### B5: Provider/key pattern scan needs second pass
 
-Initial file-list scan found many provider/config files containing key/token
-vocabulary. Most are expected code paths, not literal secrets, but they still
-need targeted review before public release.
+Status: resolved for the public seed.
+
+Targeted review found no literal shipped secrets. The review did find
+predecessor config/keychain migration behavior, which has been removed. Holt now
+uses only its own `holt` config directory and `holt` keychain service.
 
 ### B6: Frontend dependency audit needs triage
 
@@ -202,12 +222,14 @@ Completed before the first scrub checkpoint commit:
   - private source provenance terms: no hits
   - resident identity names: no hits outside `NOTICE.md` legal credit exclusion
   - machine-local private paths and known password hints: no hits
+- Vendored Hillock validation:
+  - `cargo test --manifest-path crates/hillock-core/Cargo.toml --offline`
+  - result: 87 passed, 0 failed
 
 Not claimed:
 
 - a full Tauri dev smoke test;
 - a portable public build outside the maintainer machine;
-- completion of the local `hillock-core` dependency decision;
 - completion of the frontend dependency audit.
 
 ## Discuss-Later / Possible Back-Ports
