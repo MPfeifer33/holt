@@ -37,7 +37,7 @@ small-business use free; sell it at scale, pay the licensor.
 | `app/src-tauri/` | Rust backend: runtime, providers, tools, persistence |
 | `app/src/` | SvelteKit frontend |
 | `crates/hillock-core/` | Vendored memory engine crate, scrubbed for the public cut |
-| `docs/` | Public documentation + `PUBLIC_CUT_AUDIT.md` + `DECISIONS.md` |
+| `docs/` | Public documentation, release notes, and decision records |
 | `skills/` | Skill registry content |
 | `scripts/` | Dev scripts (public-safe subset) |
 
@@ -53,14 +53,13 @@ npm run check              # frontend type/lint check
 
 ## Current State
 
-- Proper front page landed (README v2). Fresh-history public cut initialized from the private predecessor's main
-  (provenance recorded outside this repo). Scrub audit:
-  `docs/PUBLIC_CUT_AUDIT.md` — B1/B3/B4/B5/B6 resolved, B2 public docs in
-  progress as a non-gating documentation lane.
+- Proper front page landed (README v2). Fresh-history public cut initialized
+  from the private predecessor's main; public status is summarized in
+  `docs/RELEASE_NOTES.md`.
 - Backend tests: 859 passing. Frontend check/build/audit: clean. Memory-system
   representation verified against hillock-core source (rotation.rs); tier
   attribution corrected to harness-layer policy (maintainer caught it).
-- Repo is **private until the maintainer explicitly flips it public.**
+- Repo is public as of the 2026-08-08 maintainer flip.
 
 ## Conventions
 
@@ -68,3 +67,8 @@ npm run check              # frontend type/lint check
 - PROJECT.md updated every commit.
 - No CI theater: local testing before push is the CI.
 - Evidence before claims; decisions recorded in `docs/DECISIONS.md`.
+
+## Last Updated
+
+2026-08-08 — Replaced the internal public-cut audit with public release notes
+and updated docs to reflect the public repo flip.

@@ -88,24 +88,24 @@ cargo test --manifest-path app/src-tauri/Cargo.toml
 
 Create an agent in the UI, point it at a local OpenAI-compatible endpoint
 (llama.cpp, Ollama, LM Studio) or a cloud key, and start working. The
-`docs/` directory grows chapters as they're written — the decision record
-and public-cut audit are already there.
+`docs/` directory grows chapters as they're written — the decision record and
+initial public release notes are already there.
 
 ## Documentation
 
 - `PROJECT.md` — current state, layout, conventions
 - `docs/DECISIONS.md` — every consequential call in the public cut, with
   rationale
-- `docs/PUBLIC_CUT_AUDIT.md` — what was scrubbed, how, and what remains
+- `docs/RELEASE_NOTES.md` — initial public-cut status, validation snapshot,
+  known limitations, and release notes
 - Architecture chapters (lane model, memory model, tool governance,
   coordination) — in progress, arriving as ordinary commits
 
 ## Status
 
 Research harness, actively cut (2026-08). Backend tests green (859).
-Remaining pre-flip work is tracked in the audit doc. This repository is
-**private until the maintainer explicitly flips it public** — if you're
-reading this on a public remote, that decision was made deliberately.
+The initial public cut is live; remaining work is ordinary documentation,
+packaging, and research-harness hardening.
 
 ## License and Attribution
 
