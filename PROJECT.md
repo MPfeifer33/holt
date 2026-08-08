@@ -55,9 +55,9 @@ npm run check              # frontend type/lint check
 
 - Proper front page landed (README v2). Fresh-history public cut initialized from the private predecessor's main
   (provenance recorded outside this repo). Scrub audit:
-  `docs/PUBLIC_CUT_AUDIT.md` — B1/B3/B4/B5 resolved, B2 public docs in
-  progress, B6 dependency audit remains.
-- Backend tests: 859 passing. Frontend check: clean. Memory-system
+  `docs/PUBLIC_CUT_AUDIT.md` — B1/B3/B4/B5/B6 resolved, B2 public docs in
+  progress as a non-gating documentation lane.
+- Backend tests: 859 passing. Frontend check/build/audit: clean. Memory-system
   representation verified against hillock-core source (rotation.rs); tier
   attribution corrected to harness-layer policy (maintainer caught it).
 - Repo is **private until the maintainer explicitly flips it public.**

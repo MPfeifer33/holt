@@ -202,14 +202,31 @@ uses only its own `holt` config directory and `holt` keychain service.
 
 ### B6: Frontend dependency audit needs triage
 
-`npm ci` completed in the isolated Holt app copy, but `npm audit` reported
-dependency vulnerabilities inherited from the current frontend dependency graph.
-No automatic audit fix was applied during this scrub because that can change
-dependency versions and should be handled as an intentional modernization pass.
+Status: resolved for the public seed.
+
+The intentional frontend modernization pass reduced `npm audit` from 18
+reported vulnerabilities to 0. The pass updated the frontend dependency graph
+without changing application code:
+
+- upgraded the Anthropic Agent SDK and Claude Code packages to current patched
+  lines;
+- declared the Agent SDK's runtime peer dependencies explicitly;
+- upgraded SvelteKit/Svelte/Vite/Vitest/Svelte Check/Tauri JS packages within
+  the current application stack;
+- upgraded DOMPurify/marked/marked-highlight;
+- upgraded the direct sidecar-build `esbuild` dependency to the fixed `0.28`
+  line;
+- added a targeted `cookie@0.7.2` override for SvelteKit's low-severity
+  `cookie <0.7.0` audit chain after confirming Holt only depends on SvelteKit's
+  normal `parse`/`serialize` usage.
+
+No `npm audit fix --force` result was accepted. The lockfile was regenerated
+from the reviewed manifest because the inherited lock metadata could not cleanly
+resolve the Agent SDK peer transition.
 
 ## Validation Snapshot
 
-Completed before the first scrub checkpoint commit:
+Completed across the public-cut checkpoints:
 
 - Rust package formatting: `cargo fmt --manifest-path app/src-tauri/Cargo.toml --package holt --check`
 - Rust tests: `cargo test --offline` from `app/src-tauri/`
@@ -217,7 +234,13 @@ Completed before the first scrub checkpoint commit:
   - warnings retained: one unused helper and one unread config field
 - Frontend diagnostics: `npm run check`
   - result: 0 errors, 0 warnings
-- Whitespace gate: `git diff --cached --check`
+- Frontend production build: `npm run build`
+  - result: passed
+- Frontend dependency audit: `npm audit --audit-level=low`
+  - result: 0 vulnerabilities
+- Agent SDK sidecar bundle check: `npm run build:sidecar`
+  - result: passed; no tracked sidecar bundle diff
+- Whitespace gate: `git diff --check`
 - Scrub scan excluding ignored build/dependency/cache outputs:
   - private source provenance terms: no hits
   - resident identity names: no hits outside `NOTICE.md` legal credit exclusion
@@ -230,7 +253,7 @@ Not claimed:
 
 - a full Tauri dev smoke test;
 - a portable public build outside the maintainer machine;
-- completion of the frontend dependency audit.
+- a human browser smoke test of the refreshed frontend bundle.
 
 ## Discuss-Later / Possible Back-Ports
 
