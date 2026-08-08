@@ -1063,10 +1063,10 @@ mod tests {
         );
         assert_eq!(
             TurnSource::A2AMessage {
-                from_agent: "nix".into()
+                from_agent: "demo".into()
             }
             .to_string(),
-            "a2a:nix"
+            "a2a:demo"
         );
     }
 

@@ -797,7 +797,7 @@ mod tests {
 
     #[test]
     fn test_valid_agent_id() {
-        assert!(is_valid_agent_id("nix"));
+        assert!(is_valid_agent_id("demo"));
         assert!(is_valid_agent_id("agent-123"));
         assert!(is_valid_agent_id("my_agent"));
         assert!(!is_valid_agent_id(""));
@@ -1195,12 +1195,12 @@ mod tests {
 
         let manifest = PersonaAnchorManifest {
             version: 1,
-            agent_id: "nix".into(),
+            agent_id: "demo".into(),
             updated_at: None,
             updated_at_session: None,
             anchors: vec![PersonaAnchor {
                 anchor_id: "heading:SOUL.md#Trust Contract".into(),
-                declared_by: "nix".into(),
+                declared_by: "demo".into(),
                 scope: PersonaAnchorScope::MarkdownHeading {
                     file: "SOUL.md".into(),
                     heading: "Trust Contract".into(),

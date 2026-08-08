@@ -293,12 +293,12 @@ mod tests {
     fn bare_anchored_custom_filename_resolves_to_persona_dir() {
         let manifest = PersonaAnchorManifest {
             version: 1,
-            agent_id: "nix".into(),
+            agent_id: "demo".into(),
             updated_at: None,
             updated_at_session: None,
             anchors: vec![PersonaAnchor {
                 anchor_id: "file:COVENANT.md".into(),
-                declared_by: "nix".into(),
+                declared_by: "demo".into(),
                 scope: PersonaAnchorScope::File {
                     file: "COVENANT.md".into(),
                 },
