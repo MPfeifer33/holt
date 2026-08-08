@@ -1,0 +1,74 @@
+# Dependencies
+node_modules/
+target/
+
+# Build outputs
+build/
+dist/
+.svelte-kit/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Rust
+*.pdb
+Cargo.lock
+!app/src-tauri/Cargo.lock
+
+# Tauri
+src-tauri/target/
+
+# SQLite
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+
+# Logs
+*.log
+
+# Keychain/secrets
+*.keychain
+
+# Superpowers plugin cache
+.superpowers/
+
+# Claude Code
+.claude/launch.json
+CLAUDE.md
+AGENTS.md
+.codex
+Archive.zip
+Documents/substack/
+
+# Test/scratch files
+test-*.txt
+test_*.txt
+TEST_*.txt
+OPENVIKING_TEST.txt
+.fastembed_cache/
+.agent-atlas/
+.agent-sentinel/
+.agent-witness/
+.agent-workspace/
+.agent-acurl/
+
+# Auto-generated fixture reports (timestamps change every test run)
+tests/scenarios/reports/
+.agent-sentinel/

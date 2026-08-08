@@ -1,0 +1,43 @@
+{
+  "name": "holt-app",
+  "version": "0.3.3",
+  "description": "Local-first research harness for persistent human/agent collaboration",
+  "type": "module",
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+    "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
+    "tauri": "tauri",
+    "build:sidecar": "npx esbuild agent-sdk-bridge.js --bundle --platform=node --target=node18 --outfile=src-tauri/resources/agent-sdk-bridge.bundle.js --format=esm --external:@anthropic-ai/claude-agent-sdk --external:@anthropic-ai/claude-code --external:zod"
+  },
+  "license": "SEE LICENSE IN LICENSE.md",
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.2.86",
+    "@anthropic-ai/claude-code": "^2.1.81",
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-opener": "^2",
+    "@types/dompurify": "^3.0.5",
+    "@types/marked": "^5.0.2",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/addon-web-links": "^0.12.0",
+    "dompurify": "^3.3.3",
+    "highlight.js": "^11.11.1",
+    "marked": "^17.0.5",
+    "marked-highlight": "^2.2.3",
+    "xterm": "^5.3.0"
+  },
+  "devDependencies": {
+    "@sveltejs/adapter-static": "^3.0.6",
+    "@sveltejs/kit": "^2.9.0",
+    "@sveltejs/vite-plugin-svelte": "^5.0.0",
+    "@tauri-apps/cli": "^2",
+    "esbuild": "^0.27.4",
+    "svelte": "^5.0.0",
+    "svelte-check": "^4.0.0",
+    "typescript": "~5.6.2",
+    "vite": "^6.0.3",
+    "vitest": "^4.1.5"
+  }
+}

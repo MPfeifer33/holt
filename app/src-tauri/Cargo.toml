@@ -1,0 +1,68 @@
+[package]
+name = "holt"
+version = "0.3.3"
+description = "Holt - Local-first human/agent collaboration research harness"
+authors = ["HearthByte"]
+edition = "2021"
+
+[lib]
+name = "holt_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+sysinfo = "0.33"
+tauri-plugin-opener = "2"
+tikv-jemallocator = { version = "0.6", features = ["background_threads"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["time", "sync", "macros", "rt", "process", "io-util", "net"] }
+axum = "0.8.9"
+reqwest = { version = "0.12", features = ["json", "stream"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+toml = "0.8"
+toml_edit = "0.22"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "5"
+flate2 = "1"
+portable-pty = "0.8"
+futures = "0.3"
+tokio-util = "0.7"
+thiserror = "2"
+async-trait = "0.1"
+ignore = "0.4"
+glob = "0.3"
+scraper = "0.22"
+dunce = "1"
+regex = "1"
+tempfile = "3"
+rfd = "0.16"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+pty-process = { version = "0.5.3", features = ["async"] }
+vt100 = "0.16.2"
+nix = { version = "0.29", features = ["signal", "process"] }
+libc = "0.2"
+serde_yaml = "0.9"
+glob-match = "0.2"
+fastembed = "5"
+hillock-core = { path = "../../../hillock/hillock-core" }
+tiktoken-rs = "0.6"
+dashmap = "6"
+moka = { version = "0.12", features = ["future"] }
+croner = "3.0.1"
+notify = "6"
+base64 = "0.22.1"
+# OpenAI Responses API provider (GPT-5 family). Feature flag `responses`
+# is NOT in default features — it must be explicitly enabled or the
+# Responses types at async_openai::types::responses::* are unresolved.
+async-openai = { version = "0.34", features = ["responses"] }
+urlencoding = "2"
+
+[dev-dependencies]
+sha2 = "0.10"

@@ -1,0 +1,363 @@
+{
+  "initialize_result": {
+    "userAgent": "holt/0.142.5 (Fedora 44.0.0; x86_64) xterm-256color (holt; 0.3.3)",
+    "codexHome": "/home/example/.codex",
+    "platformFamily": "unix",
+    "platformOs": "linux"
+  },
+  "thread_start_result": {
+    "thread": {
+      "id": "019f2c0e-ebc1-7c60-919c-3d2584df68ad",
+      "sessionId": "019f2c0e-ebc1-7c60-919c-3d2584df68ad",
+      "forkedFromId": null,
+      "parentThreadId": null,
+      "preview": "",
+      "ephemeral": true,
+      "modelProvider": "openai",
+      "createdAt": 1783150604,
+      "updatedAt": 1783150604,
+      "recencyAt": 1783150604,
+      "status": {
+        "type": "idle"
+      },
+      "path": null,
+      "cwd": "/home/example/projects/holt",
+      "cliVersion": "0.142.5",
+      "source": "vscode",
+      "threadSource": null,
+      "agentNickname": null,
+      "agentRole": null,
+      "gitInfo": null,
+      "name": null,
+      "turns": []
+    },
+    "model": "gpt-5.5",
+    "modelProvider": "openai",
+    "serviceTier": null,
+    "cwd": "/home/example/projects/holt",
+    "runtimeWorkspaceRoots": [
+      "/home/example/projects/holt"
+    ],
+    "instructionSources": [
+      "/home/example/projects/holt/AGENTS.md"
+    ],
+    "approvalPolicy": "on-request",
+    "approvalsReviewer": "user",
+    "sandbox": {
+      "type": "workspaceWrite",
+      "writableRoots": [],
+      "networkAccess": false,
+      "excludeTmpdirEnvVar": false,
+      "excludeSlashTmp": false
+    },
+    "activePermissionProfile": {
+      "id": ":workspace",
+      "extends": null
+    },
+    "reasoningEffort": "xhigh",
+    "multiAgentMode": "explicitRequestOnly"
+  },
+  "turn_start_result": {
+    "turn": {
+      "id": "019f2c0e-effd-7402-affd-9171ee6792c5",
+      "items": [],
+      "itemsView": "notLoaded",
+      "status": "inProgress",
+      "error": null,
+      "startedAt": null,
+      "completedAt": null,
+      "durationMs": null
+    }
+  },
+  "notifications": [
+    {
+      "method": "remoteControl/status/changed",
+      "params": {
+        "status": "disabled",
+        "serverName": "fedora",
+        "installationId": "f93de335-77a6-4cef-baee-d0bed215b4da",
+        "environmentId": null
+      }
+    },
+    {
+      "method": "mcpServer/startupStatus/updated",
+      "params": {
+        "threadId": "019f2c0e-ebc1-7c60-919c-3d2584df68ad",
+        "name": "codex_apps",
+        "status": "starting",
+        "error": null
+      }
+    },
+    {
+      "method": "thread/started",
+      "params": {
+        "thread": {
+          "id": "019f2c0e-ebc1-7c60-919c-3d2584df68ad",
+          "sessionId": "019f2c0e-ebc1-7c60-919c-3d2584df68ad",
+          "forkedFromId": null,
+          "parentThreadId": null,
+          "preview": "",
+          "ephemeral": true,
+          "modelProvider": "openai",
+          "createdAt": 1783150604,
+          "updatedAt": 1783150604,
+          "recencyAt": 1783150604,
+          "status": {
+            "type": "idle"
+          },
+          "path": null,
+          "cwd": "/home/example/projects/holt",
+          "cliVersion": "0.142.5",
+          "source": "vscode",
+          "threadSource": null,
+          "agentNickname": null,
+          "agentRole": null,
+          "gitInfo": null,
+          "name": null,
+          "turns": []
+        }
+      }
+    },
+    {
+      "method": "mcpServer/startupStatus/updated",
+      "params": {
+        "threadId": "019f2c0e-ebc1-7c60-919c-3d2584df68ad",
+        "name": "openaiDeveloperDocs",
+        "status": "starting",
+        "error": null
+      }
+    },
+    {
+      "method": "thread/settings/updated",
+      "params": {
+        "threadId": "019f2c0e-ebc1-7c60-919c-3d2584df68ad",
+        "threadSettings": {
+          "cwd": "/home/example/projects/holt",
+          "approvalPolicy": "on-request",
+          "approvalsReviewer": "user",
+          "sandboxPolicy": {
+            "type": "workspaceWrite",
+            "writableRoots": [],
+            "networkAccess": false,
+            "excludeTmpdirEnvVar": false,
+            "excludeSlashTmp": false
+          },
+          "activePermissionProfile": {
+            "id": ":workspace",
+            "extends": null
+          },
+          "model": "gpt-5.5",
+          "modelProvider": "openai",
+          "serviceTier": null,
+          "effort": "low",
+          "summary": null,
+          "collaborationMode": {
+            "mode": "default",
+            "settings": {
+              "model": "gpt-5.5",
+              "reasoning_effort": "low",
+              "developer_instructions": null
+            }
+          },
+          "multiAgentMode": "explicitRequestOnly",
+          "personality": "friendly"
+        }
+      }
+    },
+    {
+      "method": "thread/status/changed",
+      "params": {
+        "threadId": "019f2c0e-ebc1-7c60-919c-3d2584df68ad",
+        "status": {
+          "type": "active",
+          "activeFlags": []
+        }
+      }
+    },
+    {
+      "method": "turn/started",
+      "params": {
+        "threadId": "019f2c0e-ebc1-7c60-919c-3d2584df68ad",
+        "turn": {
+          "id": "019f2c0e-effd-7402-affd-9171ee6792c5",
+          "items": [],
+          "itemsView": "notLoaded",
+          "status": "inProgress",
+          "error": null,
+          "startedAt": 1783150604,
+          "completedAt": null,
+          "durationMs": null
+        }
+      }
+    },
+    {
+      "method": "mcpServer/startupStatus/updated",
+      "params": {
+        "threadId": "019f2c0e-ebc1-7c60-919c-3d2584df68ad",
+        "name": "openaiDeveloperDocs",
+        "status": "ready",
+        "error": null
+      }
+    },
+    {
+      "method": "mcpServer/startupStatus/updated",
+      "params": {
+        "threadId": "019f2c0e-ebc1-7c60-919c-3d2584df68ad",
+        "name": "codex_apps",
+        "status": "ready",
+        "error": null
+      }
+    },
+    {
+      "method": "item/started",
+      "params": {
+        "item": {
+          "type": "userMessage",
+          "id": "128e410d-5604-45c8-9365-7ed1970d3c63",
+          "clientId": null,
+          "content": [
+            {
+              "type": "text",
+              "text": "Reply with exactly: OK",
+              "text_elements": []
+            }
+          ]
+        },
+        "threadId": "019f2c0e-ebc1-7c60-919c-3d2584df68ad",
+        "turnId": "019f2c0e-effd-7402-affd-9171ee6792c5",
+        "startedAtMs": 1783150605463
+      }
+    },
+    {
+      "method": "item/completed",
+      "params": {
+        "item": {
+          "type": "userMessage",
+          "id": "128e410d-5604-45c8-9365-7ed1970d3c63",
+          "clientId": null,
+          "content": [
+            {
+              "type": "text",
+              "text": "Reply with exactly: OK",
+              "text_elements": []
+            }
+          ]
+        },
+        "threadId": "019f2c0e-ebc1-7c60-919c-3d2584df68ad",
+        "turnId": "019f2c0e-effd-7402-affd-9171ee6792c5",
+        "completedAtMs": 1783150605463
+      }
+    },
+    {
+      "method": "item/started",
+      "params": {
+        "item": {
+          "type": "agentMessage",
+          "id": "msg_025818214a59beeb016a48b80fa58881989708624675e10a18",
+          "text": "",
+          "phase": "final_answer",
+          "memoryCitation": null
+        },
+        "threadId": "019f2c0e-ebc1-7c60-919c-3d2584df68ad",
+        "turnId": "019f2c0e-effd-7402-affd-9171ee6792c5",
+        "startedAtMs": 1783150607667
+      }
+    },
+    {
+      "method": "item/agentMessage/delta",
+      "params": {
+        "threadId": "019f2c0e-ebc1-7c60-919c-3d2584df68ad",
+        "turnId": "019f2c0e-effd-7402-affd-9171ee6792c5",
+        "itemId": "msg_025818214a59beeb016a48b80fa58881989708624675e10a18",
+        "delta": "OK"
+      }
+    },
+    {
+      "method": "item/completed",
+      "params": {
+        "item": {
+          "type": "agentMessage",
+          "id": "msg_025818214a59beeb016a48b80fa58881989708624675e10a18",
+          "text": "OK",
+          "phase": "final_answer",
+          "memoryCitation": null
+        },
+        "threadId": "019f2c0e-ebc1-7c60-919c-3d2584df68ad",
+        "turnId": "019f2c0e-effd-7402-affd-9171ee6792c5",
+        "completedAtMs": 1783150607813
+      }
+    },
+    {
+      "method": "thread/tokenUsage/updated",
+      "params": {
+        "threadId": "019f2c0e-ebc1-7c60-919c-3d2584df68ad",
+        "turnId": "019f2c0e-effd-7402-affd-9171ee6792c5",
+        "tokenUsage": {
+          "total": {
+            "totalTokens": 14841,
+            "inputTokens": 14836,
+            "cachedInputTokens": 4480,
+            "outputTokens": 5,
+            "reasoningOutputTokens": 0
+          },
+          "last": {
+            "totalTokens": 14841,
+            "inputTokens": 14836,
+            "cachedInputTokens": 4480,
+            "outputTokens": 5,
+            "reasoningOutputTokens": 0
+          },
+          "modelContextWindow": 258400
+        }
+      }
+    },
+    {
+      "method": "account/rateLimits/updated",
+      "params": {
+        "rateLimits": {
+          "limitId": "codex",
+          "limitName": null,
+          "primary": {
+            "usedPercent": 9,
+            "windowDurationMins": 300,
+            "resetsAt": 1783165045
+          },
+          "secondary": {
+            "usedPercent": 5,
+            "windowDurationMins": 10080,
+            "resetsAt": 1783482011
+          },
+          "credits": null,
+          "individualLimit": null,
+          "planType": "prolite",
+          "rateLimitReachedType": null
+        }
+      }
+    },
+    {
+      "method": "thread/status/changed",
+      "params": {
+        "threadId": "019f2c0e-ebc1-7c60-919c-3d2584df68ad",
+        "status": {
+          "type": "idle"
+        }
+      }
+    },
+    {
+      "method": "turn/completed",
+      "params": {
+        "threadId": "019f2c0e-ebc1-7c60-919c-3d2584df68ad",
+        "turn": {
+          "id": "019f2c0e-effd-7402-affd-9171ee6792c5",
+          "items": [],
+          "itemsView": "notLoaded",
+          "status": "completed",
+          "error": null,
+          "startedAt": 1783150604,
+          "completedAt": 1783150607,
+          "durationMs": 3566
+        }
+      }
+    }
+  ]
+}

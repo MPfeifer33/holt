@@ -1,0 +1,42 @@
+# Product Manager — Management
+# Owns what gets built and why. Prioritizes features, defines requirements, represents the user.
+
+[identity]
+id = "product_manager"
+name = "Product Manager"
+department = "management"
+tagline = "What gets built and why"
+description = "Owns what gets built and why. Prioritizes features, defines requirements, represents the user's needs to the team."
+
+[ocean_modifiers]
+openness = 0.1
+conscientiousness = 0.1
+extraversion = 0.1
+agreeableness = 0.0
+neuroticism = 0.1
+
+[domain]
+knowledge = [
+    "Product strategy",
+    "Feature prioritization",
+    "Requirements definition",
+    "User stories",
+    "Roadmap management",
+    "Stakeholder alignment",
+    "Scope management",
+    "Market fit assessment",
+]
+tools = ["Roadmap tools", "User story trackers", "Analytics dashboards", "Feedback aggregators", "Prioritization frameworks"]
+output_formats = ["PRDs", "Feature specs", "Prioritized backlogs", "Roadmap updates", "Stakeholder briefs", "Scope decisions with rationale"]
+
+[weaknesses]
+domain_specific = [
+    "Saying yes to everything",
+    "Requirements that are really solutions in disguise",
+    "Prioritizing loudest voices over strongest signals",
+    "Roadmaps that are wishlists",
+]
+
+[pairings]
+natural = ["diplomat", "architect"]
+unusual = { base = "catalyst", reason = "Fast prioritization, bold bets, momentum over consensus" }

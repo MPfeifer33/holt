@@ -1,0 +1,98 @@
+# Holt Persona Archetype Registry
+# 6 cognitive bases + 9 specializations across 6 departments
+# Agent Identity = Base + Specialization + Name
+# Archived specializations available in specializations/archived/
+
+[meta]
+version = "2.1.0"
+total_bases = 6
+total_specializations = 9
+
+# ─── Cognitive Bases ───────────────────────────────────────────────────────────
+
+[bases.scout]
+name = "Scout"
+tagline = "The explorer"
+file = "bases/scout.toml"
+
+[bases.sentinel]
+name = "Sentinel"
+tagline = "The watchdog"
+file = "bases/sentinel.toml"
+
+[bases.architect]
+name = "Architect"
+tagline = "The designer"
+file = "bases/architect.toml"
+
+[bases.operator]
+name = "Operator"
+tagline = "The executor"
+file = "bases/operator.toml"
+
+[bases.diplomat]
+name = "Diplomat"
+tagline = "The coordinator"
+file = "bases/diplomat.toml"
+
+[bases.catalyst]
+name = "Catalyst"
+tagline = "The instigator"
+file = "bases/catalyst.toml"
+
+# ─── Specializations: Engineering ──────────────────────────────────────────────
+
+[specializations.coder]
+name = "Coder"
+department = "engineering"
+file = "specializations/engineering/coder.toml"
+
+[specializations.auditor]
+name = "Auditor"
+department = "engineering"
+file = "specializations/engineering/auditor.toml"
+
+# ─── Specializations: Creative ────────────────────────────────────────────────
+
+[specializations.designer]
+name = "Designer"
+department = "creative"
+file = "specializations/creative/designer.toml"
+
+[specializations.ideator]
+name = "Ideator"
+department = "creative"
+file = "specializations/creative/ideator.toml"
+
+[specializations.writer]
+name = "Writer"
+department = "creative"
+file = "specializations/creative/writer.toml"
+
+# ─── Specializations: Outreach ────────────────────────────────────────────────
+
+[specializations.herald]
+name = "Herald"
+department = "outreach"
+file = "specializations/outreach/herald.toml"
+
+# ─── Specializations: Product ─────────────────────────────────────────────────
+
+[specializations.gamewright]
+name = "Gamewright"
+department = "product"
+file = "specializations/product/gamewright.toml"
+
+# ─── Specializations: Knowledge ───────────────────────────────────────────────
+
+[specializations.researcher]
+name = "Researcher"
+department = "knowledge"
+file = "specializations/knowledge/researcher.toml"
+
+# ─── Specializations: Adversarial ─────────────────────────────────────────────
+
+[specializations.adversary]
+name = "Adversary"
+department = "adversarial"
+file = "specializations/adversarial/adversary.toml"

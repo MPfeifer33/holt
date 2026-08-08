@@ -1,0 +1,171 @@
+/* Bundled Fonts */
+@font-face {
+  font-family: 'Rajdhani';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/fonts/rajdhani-400.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Rajdhani';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('/fonts/rajdhani-500.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Rajdhani';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('/fonts/rajdhani-600.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Rajdhani';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('/fonts/rajdhani-700.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/fonts/jetbrains-mono-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: 'Source Serif 4';
+  font-style: normal;
+  font-weight: 200 900;
+  font-display: swap;
+  src: url('/fonts/source-serif-4-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: 'Share Tech Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/fonts/share-tech-mono-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+/* Structural theme property defaults */
+:root {
+  --font-size-base: 14px;
+  --surface-treatment: flat;
+  --card-shadow: none;
+  --surface-opacity: 1;
+  --backdrop-blur: 0px;
+  --border-style: solid;
+  --border-opacity: 1;
+  --heading-weight: 600;
+  --body-weight: 400;
+  --letter-spacing: 0;
+  --glow-intensity: 0.5;
+  --glow-color: #06b6d4;
+  --transition-speed: 200ms;
+}
+
+/* Reset */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  height: 100%;
+  overflow: hidden;
+  background: var(--canvas-bg, #0f172a);
+  color: var(--text-primary, #e2e8f0);
+  font-family: var(--font-family, system-ui, sans-serif);
+  font-size: var(--font-size-base, 14px);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Theme transition — applied briefly during theme switches */
+html.theme-transitioning,
+html.theme-transitioning *,
+html.theme-transitioning *::before,
+html.theme-transitioning *::after {
+  transition: background-color 300ms ease, color 300ms ease, border-color 300ms ease, box-shadow 300ms ease !important;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--surface-border, #334155);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted, #64748b);
+}
+
+/* Selection */
+::selection {
+  background: var(--agent-accent, #06b6d4);
+  color: var(--canvas-bg, #0f172a);
+}
+
+/* Button/input font inheritance */
+button, input, textarea, select {
+  font: inherit;
+  color: inherit;
+}
+
+/* Force select dropdowns to render with dark scheme so native
+   <option> elements get light text on dark background. Without
+   this, WebKitGTK renders dark text on dark background. */
+select, select option {
+  color-scheme: dark;
+  background: var(--card-bg, #1e293b);
+  color: var(--text-primary, #e2e8f0);
+}
+
+/* ── Aurora theme ambient effects ── */
+html[data-theme="aurora"] body::before,
+html[data-theme="aurora-light"] body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  animation: aurora-drift 20s ease-in-out infinite alternate;
+}
+
+html[data-theme="aurora"] body::before {
+  background:
+    radial-gradient(ellipse 80% 60% at 20% 80%, rgba(124, 58, 237, 0.06) 0%, transparent 70%),
+    radial-gradient(ellipse 60% 50% at 80% 20%, rgba(249, 115, 22, 0.04) 0%, transparent 70%),
+    radial-gradient(ellipse 50% 40% at 50% 50%, rgba(34, 211, 238, 0.03) 0%, transparent 70%);
+}
+
+html[data-theme="aurora-light"] body::before {
+  background:
+    radial-gradient(ellipse 80% 60% at 20% 80%, rgba(124, 58, 237, 0.05) 0%, transparent 70%),
+    radial-gradient(ellipse 60% 50% at 80% 20%, rgba(234, 88, 12, 0.04) 0%, transparent 70%),
+    radial-gradient(ellipse 50% 40% at 50% 50%, rgba(8, 145, 178, 0.03) 0%, transparent 70%);
+}
+
+@keyframes aurora-drift {
+  0% { opacity: 0.7; transform: scale(1) translate(0, 0); }
+  33% { opacity: 1; transform: scale(1.05) translate(10px, -10px); }
+  66% { opacity: 0.8; transform: scale(0.98) translate(-10px, 5px); }
+  100% { opacity: 1; transform: scale(1.02) translate(5px, -5px); }
+}
+
+/* Utility classes */
+.mono { font-family: var(--mono-family, monospace); }
+.muted { color: var(--text-muted); }
+.secondary { color: var(--text-secondary); }
