@@ -38,14 +38,14 @@ research-harness cut, documented with rationale. Each entry: KEEP / GENERALIZE /
 6. **OLD/Documents/** — **EXCLUDE WHOLESALE** (collab archive, pitch deck).
 7. **PROJECT.md / CHANGELOG / DIAGNOSIS-*.md** — **EXCLUDE**; holt gets a
    fresh PROJECT.md written for the harness framing.
-8. **docs/specs/** — per-file triage (Helix + me, checklist to follow):
+8. **docs/specs/** — per-file triage (joint checklist to follow):
    specs referencing house agents/sessions exclude; generic architecture
    specs keep with a scrub pass.
 9. **Memory/Hillock integration** — **KEEP + VENDOR**: Hillock is part of
    Holt. Ship a scrubbed in-tree `hillock-core` snapshot with empty memory
    data rather than a private path dependency, public git dependency, or stub.
 10. **Provider key handling** — mechanism is keychain-ref based (clean);
-    Helix's scrub audit owns verification.
+    the scrub-audit lane owns verification.
 
 ## Framing (README skeleton, for the repo)
 

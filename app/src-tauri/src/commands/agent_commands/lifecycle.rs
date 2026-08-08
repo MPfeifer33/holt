@@ -1538,13 +1538,13 @@ mod tests {
     #[test]
     fn test_seed_identity_with_blended_bases() {
         let result = generate_seed_identity_sentence(
-            "Olivia",
+            "Avery",
             Some("architect"),
             Some("catalyst"),
             Some("creative_ideas"),
             Some("The strategist"),
         );
-        assert!(result.contains("Your name is Olivia."));
+        assert!(result.contains("Your name is Avery."));
         assert!(result.contains("architect blended with catalyst"));
         assert!(result.contains("creative ideas"));
     }
