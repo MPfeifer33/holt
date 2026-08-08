@@ -41,8 +41,11 @@ run, instrument, and disagree with.
   specializations that generate deterministic cognitive profiles at agent
   creation. Personas are configuration, not hardcoded residents.
 - **Memory (Hillock)** — a vendored SQLite memory engine with explicit
-  save/recall, tiered retention (hot/warm/cold), pinning, episode→concept
-  crystallization, and cross-space result provenance. **Isolation is
+  save/recall, importance scoring, pinning, episode→concept crystallization,
+  and cross-space result provenance. The familiar hot/warm/cold **tiering is
+  a harness-layer policy, not an engine feature**: the injection layer (in
+  this repo) composes pinning, importance, and relevance into tiered context
+  delivery over the engine's flat primitives. **Isolation is
   geometric:** each private memory space's embeddings are rotated by a
   matrix in SO(d) derived from key material (Argon2id → QR decomposition),
   computed at startup and never persisted — vectors at rest are unreadable

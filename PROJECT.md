@@ -58,7 +58,8 @@ npm run check              # frontend type/lint check
   `docs/PUBLIC_CUT_AUDIT.md` — B1/B3/B4/B5 resolved, B2 public docs in
   progress, B6 dependency audit remains.
 - Backend tests: 859 passing. Frontend check: clean. Memory-system
-  representation verified against hillock-core source (rotation.rs).
+  representation verified against hillock-core source (rotation.rs); tier
+  attribution corrected to harness-layer policy (maintainer caught it).
 - Repo is **private until the maintainer explicitly flips it public.**
 
 ## Conventions
