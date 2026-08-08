@@ -41,10 +41,16 @@ run, instrument, and disagree with.
   specializations that generate deterministic cognitive profiles at agent
   creation. Personas are configuration, not hardcoded residents.
 - **Memory (Hillock)** — a vendored SQLite memory engine with explicit
-  save/recall, tiered retention (hot/warm/cold), pinning, and episode→
-  concept crystallization. Retrieval is brute-force cosine over embeddings —
-  deliberately simple, honestly documented, fast enough at household scale.
-  The engine ships **empty**: architecture public, memories private.
+  save/recall, tiered retention (hot/warm/cold), pinning, episode→concept
+  crystallization, and cross-space result provenance. **Isolation is
+  geometric:** each private memory space's embeddings are rotated by a
+  matrix in SO(d) derived from key material (Argon2id → QR decomposition),
+  computed at startup and never persisted — vectors at rest are unreadable
+  across spaces without the space's key; shared spaces use encrypted random
+  seeds, the commons rides identity. Within a space, retrieval is
+  brute-force cosine — deliberately simple, honestly documented, fast at
+  household scale. The engine ships **empty**: architecture public,
+  memories private.
 - **Tool surface with governance** — filesystem/shell/web tools behind
   approval tiers, per-turn and per-session budgets, circuit breakers for
   repetitive tool loops, and structured receipts on results.

@@ -56,7 +56,8 @@ npm run check              # frontend type/lint check
   (provenance recorded outside this repo). Scrub audit:
   `docs/PUBLIC_CUT_AUDIT.md` — five blocker classes, B1/B3/B5 resolved,
   B2 (public docs) in progress, B4 (vendor memory engine) in progress.
-- Backend tests: 859 passing. Frontend check: clean.
+- Backend tests: 859 passing. Frontend check: clean. Memory-system
+  representation verified against hillock-core source (rotation.rs).
 - Repo is **private until the maintainer explicitly flips it public.**
 
 ## Conventions
