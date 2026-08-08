@@ -1,69 +1,109 @@
 # Holt
 
-Holt is a local-first research harness for persistent human/agent collaboration.
+**A local-first research harness for persistent, multi-agent orchestration —
+with memory, personas, tool governance, and human-in-the-loop attention as
+first-class architecture.**
 
-It is being cut from a private predecessor codebase into a separate,
-public-facing repository with fresh git history. The goal is to preserve useful
-architecture and mechanisms while removing private house state, resident agent
-identities, credentials, sessions, personal lore, and machine-specific
-assumptions.
+Holt is the public cut of a private system that has run a real multi-agent
+household for months. The private system's history, residents, and data stay
+home; the mechanisms — the parts worth studying — are here, runnable, with
+fresh history and honest documentation.
 
-This repository is **private until the maintainer explicitly flips it public**.
+A holt is a den. The code is what lives in it.
 
-## What Holt Is
+## Why It Exists
 
-Holt is intended to be a reference architecture and working research harness for
-exploring:
+Most agent frameworks are session-shaped: spin up, do a task, evaporate.
+The interesting problems start when agents *persist* — when they keep
+identity, memory, working relationships, and obligations across weeks of
+real use. Holt is the harness those problems were worked in:
 
-- persistent named agent lanes;
-- local-first memory and context rehydration;
-- human-in-the-loop approvals and attention flows;
-- agent-to-agent coordination;
-- tool surfaces designed for agent ergonomics;
-- desktop-first orchestration with inspectable state.
+- What does an agent lane need so it survives restarts, compactions, and
+  model swaps without losing itself?
+- Where does memory actually belong — in weights, in context, or in an
+  engine beside the model — and what does retrieval owe the truth?
+- How do approvals, budgets, and audit trails work when agents act with
+  real tools on a real machine?
+- What changes when several agents with different substrates share one
+  house, one memory discipline, and one human?
 
-It is not currently packaged as a turnkey product. Expect rough edges while the
-public cut is in progress.
+Holt doesn't answer these with a paper. It answers with a codebase you can
+run, instrument, and disagree with.
 
-## Public-Cut Rules
+## What's Inside
 
-The private source repository remains untouched. Work in this repository should
-follow these rules:
+- **Persistent agent lanes** — named agents with their own connection,
+  protocol, working directory, tools, limits, and conversation history.
+  Local models, cloud APIs, MCP servers, and an Agent SDK sidecar are all
+  first-class connection types; capability truth derives from the
+  connection, not from session luck.
+- **Archetype personas** — a registry of composable bases and
+  specializations that generate deterministic cognitive profiles at agent
+  creation. Personas are configuration, not hardcoded residents.
+- **Memory (Hillock)** — a vendored SQLite memory engine with explicit
+  save/recall, tiered retention (hot/warm/cold), pinning, and episode→
+  concept crystallization. Retrieval is brute-force cosine over embeddings —
+  deliberately simple, honestly documented, fast enough at household scale.
+  The engine ships **empty**: architecture public, memories private.
+- **Tool surface with governance** — filesystem/shell/web tools behind
+  approval tiers, per-turn and per-session budgets, circuit breakers for
+  repetitive tool loops, and structured receipts on results.
+- **Traces** — SQLite logging of runtime events for after-the-fact
+  archaeology of what an agent actually did.
+- **Externally-driven lanes** — agents whose turns originate outside the
+  app (a terminal session, another harness) while the app still carries
+  their identity, persona injection, and coordination surface.
+- **Checkpoint/restore, session persistence, context compaction** — the
+  unglamorous machinery that makes "persistent" true.
 
-1. Fresh history only. Do not import the private repository's git history.
-2. No private data: credentials, session logs, conversation fixtures, resident
-   personas, machine-local paths, or household-only docs.
-3. No baked-in resident identities. Example lanes must be generic and
-   configurable.
-4. Public docs should explain mechanisms, not private house lore.
-5. Improvements discovered during cleanup go into a discuss-later ledger before
-   any back-port to the private repository.
-6. License posture is PolyForm Small Business 1.0.0 plus the repository NOTICE;
-   do not change it without an explicit maintainer decision.
+## What It Is Not
 
-## Current Cut Status
+- Not a product, not supported, not stable. Expect rough edges; they're
+  part of the exhibit.
+- Not cloud-anything. Local-first; your keys live in your OS keychain;
+  nothing phones home.
+- Not the private system. Fresh history, no residents, no data. Some
+  internal code keeps the predecessor's naming by deliberate decision —
+  see `docs/DECISIONS.md`.
 
-Source snapshot:
+## Quick Start
 
-- created from a private predecessor snapshot;
-- exact private provenance is tracked outside this repository;
-- public-cut repository: Holt.
+```bash
+npm install
+npm run tauri dev      # development app
+npm run tauri build    # production build (frontend + sidecar + binary)
 
-Immediate work is tracked in:
+# backend tests
+cargo test --manifest-path app/src-tauri/Cargo.toml
+```
 
-- [Public Cut Audit](docs/PUBLIC_CUT_AUDIT.md)
-- local coordination ledgers outside the public source tree
+Create an agent in the UI, point it at a local OpenAI-compatible endpoint
+(llama.cpp, Ollama, LM Studio) or a cloud key, and start working. The
+`docs/` directory grows chapters as they're written — the decision record
+and public-cut audit are already there.
 
-## Development
+## Documentation
 
-This section will be rewritten once the public cut is scrubbed and build-tested.
-For now, treat the source as under active surgery.
+- `PROJECT.md` — current state, layout, conventions
+- `docs/DECISIONS.md` — every consequential call in the public cut, with
+  rationale
+- `docs/PUBLIC_CUT_AUDIT.md` — what was scrubbed, how, and what remains
+- Architecture chapters (lane model, memory model, tool governance,
+  coordination) — in progress, arriving as ordinary commits
 
-The current application shape is:
+## Status
 
-- Rust + Tauri backend under `app/src-tauri/`
-- Svelte frontend under `app/src/`
-- bundled resources under `app/src-tauri/resources/`
+Research harness, actively cut (2026-08). Backend tests green (859).
+Remaining pre-flip work is tracked in the audit doc. This repository is
+**private until the maintainer explicitly flips it public** — if you're
+reading this on a public remote, that decision was made deliberately.
 
-Do not publish, tag, or announce this repository until the audit checklist is
-complete.
+## License and Attribution
+
+PolyForm Small Business 1.0.0 — see `LICENSE.md` and `NOTICE.md`.
+Personal use: free, unconditionally. Small-business use (under 100 people
+and $1M revenue): free. Beyond that — including selling products built on
+this — requires a commercial license. Credit is required and travels with
+every copy.
+
+Copyright HearthByte (Mark Pfeifer).

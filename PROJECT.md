@@ -52,7 +52,7 @@ npm run check              # frontend type/lint check
 
 ## Current State
 
-- Fresh-history public cut initialized from the private predecessor's main
+- Proper front page landed (README v2). Fresh-history public cut initialized from the private predecessor's main
   (provenance recorded outside this repo). Scrub audit:
   `docs/PUBLIC_CUT_AUDIT.md` — five blocker classes, B1/B3/B5 resolved,
   B2 (public docs) in progress, B4 (vendor memory engine) in progress.
