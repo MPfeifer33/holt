@@ -1,6 +1,12 @@
 # Holt Public Cut Audit
 
-Status: first scrub checkpoint ready
+Status: ALL BLOCKERS CLOSED (2026-08-08 evening) — B1 residents/fixtures,
+B3 branding (nomenclature ruling), B4 hillock-core vendored (crates/), B5
+secrets + migration paths, B6 frontend deps (18 advisories -> 0). B2 public
+docs: foundation landed (README v2, PROJECT.md, DECISIONS.md); architecture
+chapters are non-gating post-flip work per maintainer ruling. Remaining gate:
+maintainer review -> maintainer flips public. No Tauri/browser smoke has been
+claimed on the final tree.
 Started: 2026-08-08
 Source: private predecessor snapshot; exact provenance is tracked outside this repository.
 
