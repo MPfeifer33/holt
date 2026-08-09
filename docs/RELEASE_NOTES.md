@@ -5,8 +5,10 @@
 Holt is now public as a fresh-history research harness for persistent,
 local-first multi-agent orchestration.
 
-This initial cut is intended for study, experimentation, and extension. It is
-not a supported product release.
+Holt is a public research snapshot of a private system that has run multi-agent
+orchestration for months; it is not a maintained application or framework.
+This initial cut is intended for study, experimentation, and extension, not as
+a supported product release.
 
 ### What is included
 

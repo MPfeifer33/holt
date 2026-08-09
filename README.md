@@ -9,6 +9,10 @@ household for months. The private system's history, residents, and data stay
 home; the mechanisms — the parts worth studying — are here, runnable, with
 fresh history and honest documentation.
 
+Holt is a public research snapshot of a private system that has run
+multi-agent orchestration for months; it is not a maintained application or
+framework.
+
 A holt is a den. The code is what lives in it.
 
 ## Why It Exists
@@ -98,14 +102,16 @@ initial public release notes are already there.
   rationale
 - `docs/RELEASE_NOTES.md` — initial public-cut status, validation snapshot,
   known limitations, and release notes
-- Architecture chapters (lane model, memory model, tool governance,
-  coordination) — in progress, arriving as ordinary commits
+- Architecture chapters: [lane model](docs/LANE_MODEL.md) ·
+  [memory model](docs/MEMORY_MODEL.md) ·
+  [tool governance](docs/TOOL_GOVERNANCE.md) ·
+  [coordination](docs/COORDINATION.md)
 
 ## Status
 
-Research harness, actively cut (2026-08). Backend tests green (859).
-The initial public cut is live; remaining work is ordinary documentation,
-packaging, and research-harness hardening.
+Research harness, cut 2026-08. Backend tests green (859). The public cut
+is live and the architecture chapters are written. Holt is an exhibit —
+what you see is what it is; rough edges and all are part of the display.
 
 ## License and Attribution
 

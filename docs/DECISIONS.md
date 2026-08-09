@@ -59,6 +59,24 @@ research-harness cut, documented with rationale. Each entry: KEEP / GENERALIZE /
 - (accumulating as the cut proceeds; nothing auto-applies to main.)
 
 
+## Amendments (2026-08-08, post-flip)
+
+- **Codex trust posture — full trust IS the design** (supersedes the
+  approval-tiered intent in Lanes #3). The public cut ships
+  `ApprovalPolicy::Never` + `DangerFullAccess` with auto-accepted approvals.
+  Lane-chapter verification surfaced this as a divergence from the original
+  ruling; the maintainer's response was that the ruling, not the code, was
+  wrong: agents at full trust are the useful configuration — that's the whole
+  point. **No approval-tier work is planned, ever, and the Codex lane is not
+  slated for change.** Holt is a snapshot, not a maintained product: what you
+  see is what you get. Documented in `LANE_MODEL.md` (Driver 3). The original
+  entry stands unedited per this record's no-retroactive-rewrite rule.
+- **Execution note on Lanes #1–#2:** both GENERALIZE rulings were executed by
+  *deletion* — no example primary-agent lane and no `external-lane` example
+  agent ship; the mechanisms (`protected` flag, `Local { port: 0 }`
+  externally-driven convention) remain. Entries in this record describe
+  intent at ruling time, not necessarily shipped state.
+
 ## Ratified rulings (2026-08-08)
 
 - **Name:** holt (public/presentation); internal code nomenclature retained

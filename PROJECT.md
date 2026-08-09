@@ -9,6 +9,10 @@ the public, identity-free cut of a private predecessor system. Holt exists so
 the architecture and mechanisms can be studied, run, and extended without the
 private system's history, residents, or data.
 
+Holt is a public research snapshot of a private system that has run
+multi-agent orchestration for months; it is not a maintained application or
+framework.
+
 Not a product. Not supported. Rough edges are part of the exhibit.
 
 **Naming note:** the presentation layer says Holt; some internal code retains
@@ -60,6 +64,11 @@ npm run check              # frontend type/lint check
   representation verified against hillock-core source (rotation.rs); tier
   attribution corrected to harness-layer policy (maintainer caught it).
 - Repo is public as of the 2026-08-08 maintainer flip.
+- All four architecture chapters landed (`docs/LANE_MODEL.md`,
+  `MEMORY_MODEL.md`, `TOOL_GOVERNANCE.md`, `COORDINATION.md`) — every claim
+  code-verified at writing time. `DECISIONS.md` amended same day: Codex
+  full-trust posture ratified as the design (supersedes the approval-tiered
+  intent); Holt framed as an exhibit, not a maintained product.
 
 ## Conventions
 
