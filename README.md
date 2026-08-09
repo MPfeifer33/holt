@@ -26,8 +26,6 @@ real use. Holt is the harness those problems were worked in:
   model swaps without losing itself?
 - Where does memory actually belong — in weights, in context, or in an
   engine beside the model — and what does retrieval owe the truth?
-- How do approvals, budgets, and audit trails work when agents act with
-  real tools on a real machine?
 - What changes when several agents with different substrates share one
   house, one memory discipline, and one human?
 
