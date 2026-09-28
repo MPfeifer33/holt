@@ -15,6 +15,24 @@ framework.
 
 A holt is a den. The code is what lives in it.
 
+## See It, Run It
+
+<!-- TODO(Mark): one screenshot or a 15-second GIF of the canvas with two agents
+     and an approval card. Save it as docs/images/holt-canvas.png and uncomment:
+![Holt canvas: agents, an approval card, the memory tile](docs/images/holt-canvas.png)
+-->
+
+```bash
+git clone https://github.com/MPfeifer33/holt && cd holt
+cargo test --manifest-path app/src-tauri/Cargo.toml   # 865 backend tests, ~1 min
+npm install && npm run tauri dev                        # the desktop app
+```
+
+Create an agent, point it at a local OpenAI-compatible endpoint (llama.cpp,
+Ollama, LM Studio) or a cloud key, and start working. If you're reviewing
+rather than running, **[docs/REVIEWER_TOUR.md](docs/REVIEWER_TOUR.md)** walks
+six files in fifteen minutes.
+
 ## Why It Exists
 
 Most agent frameworks are session-shaped: spin up, do a task, evaporate.
@@ -98,8 +116,10 @@ initial public release notes are already there.
 - `PROJECT.md` — current state, layout, conventions
 - `docs/DECISIONS.md` — every consequential call in the public cut, with
   rationale
-- `docs/RELEASE_NOTES.md` — initial public-cut status, validation snapshot,
-  known limitations, and release notes
+- `docs/RELEASE_NOTES.md` — public-cut status, validation snapshot, known
+  limitations, and dated entries (latest: 2026-09-28 security fixes)
+- `docs/REVIEWER_TOUR.md` — six files in fifteen minutes, for anyone deciding
+  whether to read further
 - Architecture chapters: [lane model](docs/LANE_MODEL.md) ·
   [memory model](docs/MEMORY_MODEL.md) ·
   [tool governance](docs/TOOL_GOVERNANCE.md) ·
@@ -107,8 +127,9 @@ initial public release notes are already there.
 
 ## Status
 
-Research harness, cut 2026-08. Backend tests green (859). The public cut
-is live and the architecture chapters are written. Holt is an exhibit —
+Research harness, cut 2026-08, security fixes landed 2026-09-28. Backend
+tests green (865). The public cut is live and the architecture chapters are
+written. Holt is an exhibit —
 what you see is what it is; rough edges and all are part of the display.
 
 ## License and Attribution
