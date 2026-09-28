@@ -1,33 +1,21 @@
 use serde_json::json;
 use std::collections::BTreeMap;
 
-use crate::config::agent_config::{AgentConfigFile, AgentToolsBlock};
+use crate::config::agent_config::AgentToolsBlock;
 use crate::runtime::connection::AgentProtocol;
 use crate::tools::registry::ToolRegistry;
 use crate::tools::types::{Tool, ToolContext, ToolError, ToolResult};
 
 pub struct ListAvailableToolsTool;
 
-fn load_tools_config(agent_id: &str) -> AgentToolsBlock {
-    let config_path = crate::config::app_config::agent_dir(agent_id).join("config.toml");
-    if config_path.exists() {
-        AgentConfigFile::load(&config_path)
-            .map(|cfg| cfg.tools)
-            .unwrap_or_default()
-    } else {
-        AgentToolsBlock::default()
-    }
-}
-
-fn load_sandbox_level(agent_id: &str) -> String {
-    let config_path = crate::config::app_config::agent_dir(agent_id).join("config.toml");
-    if config_path.exists() {
-        AgentConfigFile::load(&config_path)
-            .map(|cfg| cfg.resolved_execution_sandbox().level)
-            .unwrap_or_else(|_| "unrestricted".to_string())
-    } else {
-        "unrestricted".to_string()
-    }
+/// Tools block + sandbox level, fail-closed: an unreadable config is an
+/// error, not the unrestricted defaults.
+fn load_tools_and_sandbox(agent_id: &str) -> Result<(AgentToolsBlock, String), ToolError> {
+    crate::config::agent_config::tools_and_sandbox_for(agent_id).map_err(|e| ToolError {
+        code: crate::tools::types::ToolErrorCode::InternalError,
+        message: format!("Agent config unreadable: {e}"),
+        retryable: false,
+    })
 }
 
 /// Map a tool name to its domain category.
@@ -125,7 +113,7 @@ impl Tool for ListAvailableToolsTool {
             (agent.protocol.clone(), agent.coordinator_mode)
         };
 
-        let tools_config = load_tools_config(&context.agent_id);
+        let (tools_config, sandbox_level) = load_tools_and_sandbox(&context.agent_id)?;
         let plugin_host = context.app_state.as_ref().map(|state| &state.plugin_host);
 
         let registry = if matches!(protocol, AgentProtocol::AgentSdk) {
@@ -133,7 +121,6 @@ impl Tool for ListAvailableToolsTool {
         } else if matches!(protocol, AgentProtocol::Codex) {
             ToolRegistry::build_for_codex_agent_with_tools(&tools_config, plugin_host).await
         } else {
-            let sandbox_level = load_sandbox_level(&context.agent_id);
             ToolRegistry::build_for_agent(
                 &tools_config,
                 plugin_host,

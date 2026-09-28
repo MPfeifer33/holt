@@ -1,5 +1,28 @@
 # Holt Release Notes
 
+## 2026-09-28 — Security fixes from the predecessor's audit
+
+Three findings from a full audit of the private predecessor (2026-09-28) apply
+to Holt's tree verbatim and are fixed here the same day, each with a test that
+was watched failing first.
+
+- **`start_process` ran outside the sandbox.** bwrap wrapped only the PTY
+  bash session; the background-process tool spawned `shell -c` directly with
+  a caller-chosen working directory. It now builds a `LaunchPlan`
+  (`tools/shell/process.rs`): sandboxed agents run inside the same bwrap
+  namespace as their shell and only inside the workspace, restricted agents
+  are refused, unrestricted agents go to the shell as before. The sandbox
+  comes from the agent's live PTY config or, failing that, its `config.toml`.
+- **A corrupt per-agent `config.toml` silently granted the default tool set at
+  `unrestricted`.** `agent_config::tools_and_sandbox_from` fails closed:
+  missing file → defaults, unparseable file → error. Wired at the
+  send-message boundary and `list_available_tools`.
+- **OAuth refresh rewrote the credentials file with the umask mode (0644).**
+  The temp file is now created 0600 and fsynced before the rename.
+
+Not ported: the predecessor's runtime moved to a new lane in September 2026;
+its step-loop fixes have no counterpart in Holt's engine.
+
 ## 2026-08-08 — Initial public research cut
 
 Holt is now public as a fresh-history research harness for persistent,

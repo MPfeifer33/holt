@@ -446,6 +446,37 @@ impl AgentConfigFile {
     }
 }
 
+
+/// The tools block and sandbox level an agent runs with, from its
+/// `config.toml`. A missing file means the defaults; a file that exists
+/// but does not parse is an error, never the defaults: a typo in a
+/// sandboxed worker's config must not hand it an unrestricted shell.
+pub fn tools_and_sandbox_from(path: &Path) -> Result<(AgentToolsBlock, String), String> {
+    if !path.exists() {
+        return Ok((AgentToolsBlock::default(), "unrestricted".to_string()));
+    }
+    let cfg = AgentConfigFile::load(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let level = cfg.resolved_execution_sandbox().level;
+    Ok((cfg.tools, level))
+}
+
+/// `tools_and_sandbox_from` for an agent id (its `config.toml` under the
+/// agent dir).
+pub fn tools_and_sandbox_for(agent_id: &str) -> Result<(AgentToolsBlock, String), String> {
+    tools_and_sandbox_from(&crate::config::app_config::agent_dir(agent_id).join("config.toml"))
+}
+
+/// The agent's execution sandbox block, if it has a config file. Same
+/// fail-closed rule as `tools_and_sandbox_from`.
+pub fn execution_sandbox_for(agent_id: &str) -> Result<Option<ExecutionSandboxBlock>, String> {
+    let path = crate::config::app_config::agent_dir(agent_id).join("config.toml");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let cfg = AgentConfigFile::load(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(Some(cfg.resolved_execution_sandbox()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -789,5 +820,21 @@ system_prompt = "Test"
 "#;
         let parsed: AgentConfigFile = toml::from_str(toml_text).unwrap();
         assert_eq!(parsed.profile, "unrestricted");
+    }
+    #[test]
+    fn corrupt_agent_config_is_an_error_not_unrestricted_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("config.toml");
+        std::fs::write(&p, "this is = not [valid toml").unwrap();
+        let err = tools_and_sandbox_from(&p).unwrap_err();
+        assert!(err.contains("config.toml"), "{err}");
+    }
+
+    #[test]
+    fn missing_agent_config_yields_the_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tools, level) = tools_and_sandbox_from(&dir.path().join("config.toml")).unwrap();
+        assert_eq!(level, "unrestricted");
+        assert_eq!(tools.code_execution, AgentToolsBlock::default().code_execution);
     }
 }

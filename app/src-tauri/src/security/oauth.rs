@@ -157,8 +157,29 @@ fn write_credentials_atomic(path: &Path, creds: &OAuthCredentials) -> Result<(),
 
     let json = serde_json::to_string_pretty(&file_data)?;
 
+    // Owner-only from the first byte: the temp file is created 0600 (not
+    // the umask default) so the rename never widens the credentials file,
+    // and it is fsynced so a crash can't leave a truncated token file.
     let tmp_path = path.with_extension("json.tmp");
-    std::fs::write(&tmp_path, &json)?;
+    {
+        use std::io::Write;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(&tmp_path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // In case the file pre-existed with a wider mode.
+            f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+        f.write_all(json.as_bytes())?;
+        f.sync_all()?;
+    }
     std::fs::rename(&tmp_path, path)?;
 
     Ok(())
@@ -308,5 +329,25 @@ mod tests {
     fn test_default_credentials_path() {
         let path = default_credentials_path();
         assert!(path.to_str().unwrap().contains(".claude/.credentials.json"));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn a_refreshed_credentials_file_stays_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join(".credentials.json");
+        std::fs::write(&p, "{}").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let creds = OAuthCredentials {
+            access_token: "a".into(),
+            refresh_token: "r".into(),
+            expires_at: 1,
+            subscription_type: None,
+            rate_limit_tier: None,
+        };
+        write_credentials_atomic(&p, &creds).unwrap();
+        let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "refresh must not widen the file mode");
+        assert!(!dir.path().join(".credentials.json.tmp").exists(), "no temp file left behind");
     }
 }

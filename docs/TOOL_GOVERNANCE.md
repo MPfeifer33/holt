@@ -23,8 +23,10 @@ tests whose entire job is to assert that the SDK and Codex registries do
 
 Within a lane, per-agent config narrows further: capability flags
 (filesystem, code execution, web access, A2A), a restricted sandbox level
-that strips write/shell tools, and a coordinator mode that trades
-`spawn_subagent` away. Subagents can't spawn subagents — depth one,
+that strips write/shell tools, a sandboxed level that runs the shell *and*
+background processes inside one bwrap namespace scoped to the workspace,
+and a coordinator mode that trades `spawn_subagent` away. A config that
+exists but does not parse is an error, never the unrestricted defaults. Subagents can't spawn subagents — depth one,
 enforced by construction.
 
 ## One implementation, three transports

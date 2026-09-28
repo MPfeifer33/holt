@@ -21,11 +21,63 @@ pub struct BackgroundProcess {
     _child: Arc<Mutex<Child>>,
 }
 
+/// How a background command is launched: the program to exec and its
+/// argument list. Sandboxed agents run inside the same bwrap namespace the
+/// PTY shell uses; unsandboxed agents go straight to the shell.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaunchPlan {
+    pub program: String,
+    pub args: Vec<String>,
+}
+
+/// Build the launch plan for `command` in `cwd` under the agent's sandbox
+/// (`None` = no config, unrestricted). Fails closed: restricted agents
+/// never start processes, and a sandboxed process cannot start outside
+/// its workspace.
+pub fn launch_plan(
+    command: &str,
+    cwd: &std::path::Path,
+    sandbox: Option<(&crate::config::agent_config::ExecutionSandboxBlock, &std::path::Path)>,
+) -> Result<LaunchPlan, ToolError> {
+    let config = ShellConfig::for_current_os();
+    match sandbox {
+        Some((cfg, _)) if cfg.is_restricted() => Err(ToolError {
+            code: ToolErrorCode::PermissionDenied,
+            message: "Restricted agents cannot start processes".to_string(),
+            retryable: false,
+        }),
+        Some((cfg, workspace_root)) if cfg.is_sandboxed() => {
+            if !cwd.starts_with(workspace_root) {
+                return Err(ToolError {
+                    code: ToolErrorCode::PathOutOfBounds,
+                    message: format!(
+                        "Sandboxed agents can only start processes inside the workspace ({}); {} is outside it",
+                        workspace_root.display(),
+                        cwd.display()
+                    ),
+                    retryable: false,
+                });
+            }
+            let mut args = super::pty_session::PtySession::build_bwrap_args(cwd, workspace_root, cfg)?;
+            args.push("-c".to_string());
+            args.push(command.to_string());
+            Ok(LaunchPlan { program: "bwrap".to_string(), args })
+        }
+        _ => {
+            let mut args = config.shell_args.clone();
+            args.push(command.to_string());
+            Ok(LaunchPlan { program: config.shell_binary.to_string_lossy().into_owned(), args })
+        }
+    }
+}
+
 const MAX_BUFFER_LINES: usize = 1000;
 /// Maximum lifetime for a background process before auto-kill (1 hour).
 const MAX_BACKGROUND_PROCESS_LIFETIME_SECS: u64 = 3600;
 
 impl BackgroundProcess {
+    // One caller; the sandbox is the eighth argument on purpose.
+    #[allow(clippy::too_many_arguments)]
     pub async fn spawn(
         id: String,
         label: String,
@@ -34,15 +86,15 @@ impl BackgroundProcess {
         working_dir: Option<&str>,
         default_cwd: &std::path::Path,
         env: Option<std::collections::HashMap<String, String>>,
+        sandbox: Option<(crate::config::agent_config::ExecutionSandboxBlock, std::path::PathBuf)>,
     ) -> Result<Self, ToolError> {
-        let config = ShellConfig::for_current_os();
         let cwd = working_dir
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| default_cwd.to_path_buf());
 
-        let mut cmd = Command::new(&config.shell_binary);
-        cmd.args(&config.shell_args)
-            .arg(command)
+        let plan = launch_plan(command, &cwd, sandbox.as_ref().map(|(c, w)| (c, w.as_path())))?;
+        let mut cmd = Command::new(&plan.program);
+        cmd.args(&plan.args)
             .current_dir(&cwd)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -229,6 +281,24 @@ impl Tool for StartProcessTool {
                 .unwrap_or("000")
         );
 
+        // The agent's sandbox: what the PTY shell was spawned with, or the
+        // config file if no shell session exists yet. A config that won't
+        // parse is an error, not a free pass.
+        let sandbox = {
+            let manager = context.shell_manager.read().await;
+            manager.sandbox_configs.get(&context.agent_id).cloned()
+        };
+        let sandbox = match sandbox {
+            Some(s) => Some(s),
+            None => crate::config::agent_config::execution_sandbox_for(&context.agent_id)
+                .map_err(|e| ToolError {
+                    code: ToolErrorCode::PermissionDenied,
+                    message: format!("Cannot determine the agent's sandbox level: {e}"),
+                    retryable: false,
+                })?
+                .map(|cfg| (cfg, context.workspace_root.clone())),
+        };
+
         let process = BackgroundProcess::spawn(
             process_id.clone(),
             label.to_string(),
@@ -237,6 +307,7 @@ impl Tool for StartProcessTool {
             working_dir,
             &context.working_directory,
             env,
+            sandbox,
         )
         .await?;
 
@@ -556,5 +627,32 @@ mod tests {
     fn test_max_lifetime_not_zero() {
         // Zero timeout would instantly kill every process
         assert!(MAX_BACKGROUND_PROCESS_LIFETIME_SECS > 0);
+    }
+    #[test]
+    fn sandboxed_agents_start_processes_inside_bwrap() {
+        let mut cfg = crate::config::agent_config::ExecutionSandboxBlock::legacy_default();
+        cfg.level = "sandboxed".into();
+        let ws = std::path::Path::new("/tmp/ws");
+        let plan = launch_plan("echo hi", ws, Some((&cfg, ws))).unwrap();
+        assert_eq!(plan.program, "bwrap");
+        assert!(plan.args.iter().any(|a| a == "--unshare-pid"), "{:?}", plan.args);
+        let n = plan.args.len();
+        assert_eq!(&plan.args[n - 2..], ["-c", "echo hi"], "{:?}", plan.args);
+    }
+
+    #[test]
+    fn unsandboxed_agents_start_processes_through_the_shell_directly() {
+        let plan = launch_plan("echo hi", std::path::Path::new("/tmp"), None).unwrap();
+        let shell = ShellConfig::for_current_os();
+        assert_eq!(plan.program, shell.shell_binary.to_string_lossy());
+        assert_eq!(plan.args.last().map(String::as_str), Some("echo hi"));
+    }
+
+    #[test]
+    fn a_sandboxed_process_cannot_start_outside_the_workspace() {
+        let mut cfg = crate::config::agent_config::ExecutionSandboxBlock::legacy_default();
+        cfg.level = "sandboxed".into();
+        let err = launch_plan("ls", std::path::Path::new("/etc"), Some((&cfg, std::path::Path::new("/tmp/ws")))).unwrap_err();
+        assert!(err.message.contains("workspace"), "{}", err.message);
     }
 }

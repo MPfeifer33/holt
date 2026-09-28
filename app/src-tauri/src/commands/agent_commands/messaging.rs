@@ -98,19 +98,9 @@ pub(crate) async fn execute_turn_inner(
         return result;
     }
 
-    let (tools_config, sandbox_level) = {
-        let config_path = crate::config::app_config::agent_dir(agent_id).join("config.toml");
-        if config_path.exists() {
-            crate::config::agent_config::AgentConfigFile::load(&config_path)
-                .map(|cfg| {
-                    let es = cfg.resolved_execution_sandbox();
-                    (cfg.tools, es.level)
-                })
-                .unwrap_or_else(|_| (AgentToolsBlock::default(), "unrestricted".to_string()))
-        } else {
-            (AgentToolsBlock::default(), "unrestricted".to_string())
-        }
-    };
+    // Fail closed on an unreadable config: never run with default tools.
+    let (tools_config, sandbox_level) = crate::config::agent_config::tools_and_sandbox_for(agent_id)
+        .map_err(|e| CommandError::internal(format!("agent config unreadable, refusing to run with default tools: {e}")))?;
     let coordinator_mode = {
         let agents = state.agents.read().await;
         agents

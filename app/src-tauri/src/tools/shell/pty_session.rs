@@ -235,7 +235,7 @@ impl PtySession {
     }
 
     /// Build the bwrap argument list for a sandboxed shell session.
-    fn build_bwrap_args(
+    pub(crate) fn build_bwrap_args(
         initial_cwd: &std::path::Path,
         workspace_root: &std::path::Path,
         config: &ExecutionSandboxBlock,

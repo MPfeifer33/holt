@@ -60,7 +60,12 @@ npm run check              # frontend type/lint check
 - Proper front page landed (README v2). Fresh-history public cut initialized
   from the private predecessor's main; public status is summarized in
   `docs/RELEASE_NOTES.md`.
-- Backend tests: 859 passing. Frontend check/build/audit: clean. Memory-system
+- 2026-09-28: three security fixes ported from the predecessor's audit
+  (`start_process` honours the sandbox; unreadable agent config fails closed;
+  credentials file stays 0600) — see `docs/RELEASE_NOTES.md`.
+- Backend tests: 865 passing (one, `test_hash_deterministic`, needs the
+  embedding model cached locally; a fresh clone without network will fail it).
+  Frontend check/build/audit: clean. Memory-system
   representation verified against hillock-core source (rotation.rs); tier
   attribution corrected to harness-layer policy (maintainer caught it).
 - Repo is public as of the 2026-08-08 maintainer flip.
@@ -79,5 +84,5 @@ npm run check              # frontend type/lint check
 
 ## Last Updated
 
-2026-08-08 — Replaced the internal public-cut audit with public release notes
-and updated docs to reflect the public repo flip.
+2026-09-28 — Ported three security fixes (sandboxed background processes,
+fail-closed agent config, 0600 credentials) with tests; release notes entry.
