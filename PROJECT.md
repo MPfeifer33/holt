@@ -84,5 +84,4 @@ npm run check              # frontend type/lint check
 
 ## Last Updated
 
-2026-09-28 — Ported three security fixes (sandboxed background processes,
-fail-closed agent config, 0600 credentials) with tests; release notes entry.
+2026-10-01 — README hero screenshot added (`docs/images/holt-canvas.png`): the private system's canvas and a live lane, captioned as such.

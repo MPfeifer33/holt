@@ -17,10 +17,10 @@ A holt is a den. The code is what lives in it.
 
 ## See It, Run It
 
-<!-- TODO(Mark): one screenshot or a 15-second GIF of the canvas with two agents
-     and an approval card. Save it as docs/images/holt-canvas.png and uncomment:
-![Holt canvas: agents, an approval card, the memory tile](docs/images/holt-canvas.png)
--->
+![The canvas: seven agents, one working, and a live lane mid-conversation](docs/images/holt-canvas.png)
+
+*The private system Holt was cut from, in daily use: the agent canvas on the left, one lane open on
+the right. Not every task is a coding task.*
 
 ```bash
 git clone https://github.com/MPfeifer33/holt && cd holt
