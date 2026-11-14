@@ -26,6 +26,7 @@ pub mod limits;
 pub mod local_model_settings;
 pub mod memory;
 pub mod memory_pipeline;
+pub mod nightly_scheduler;
 pub mod openai_responses_settings;
 pub mod persona;
 pub mod persona_registry;

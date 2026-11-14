@@ -3,8 +3,10 @@
 //! Replaces the HTTP-based HillockClient with an in-process Engine.
 //! Same public API surface so callers don't need to change.
 
-use super::store::{MemoryCategory, MemorySource};
-use super::types::{HillockMemory, HillockRetrieveResult, HillockStoreResult};
+use super::store::{MemoryCategory, MemorySource, WriteOptions};
+use super::types::{
+    HillockMemory, HillockRetrieveResult, HillockStoreResult, RecalledMemory, SimilarMemory,
+};
 use super::MemoryError;
 
 use hillock_core::embed::fastembed_embedder::FastEmbedder;
@@ -87,19 +89,204 @@ fn source_to_hillock(src: &MemorySource) -> hillock_core::model::MemorySource {
 // Result conversion
 // ---------------------------------------------------------------------------
 
-fn recall_result_to_hillock_memory(r: &RecallResult) -> HillockMemory {
-    HillockMemory {
+/// A recall hit as the engine reported it. `pins` is the asking agent's pin table; a
+/// fragment is pinned when its parent is, because only whole memories can be pinned.
+fn recalled_from(r: &RecallResult, pins: &std::collections::HashSet<Uuid>) -> RecalledMemory {
+    let is_fragment = r.parent_id.is_some();
+    RecalledMemory {
         id: r.memory_id.to_string(),
+        parent_id: r.parent_id.map(|id| id.to_string()),
+        chunk_index: r.chunk_index.filter(|_| is_fragment),
+        chunk_count: r.chunk_count.filter(|_| is_fragment),
         content: r.content.clone(),
         category: kind_to_category(&r.metadata.kind),
-        tier: "warm".to_string(), // Hillock has no tiers
         importance: r.metadata.importance.unwrap_or(0.5) as f64,
         score: r.score as f64,
+        cosine: r.cosine_score as f64,
         tags: r.metadata.tags.clone(),
         source: r.metadata.source_agent.clone().unwrap_or_default(),
         source_type: Some(format!("{:?}", r.metadata.source)),
         created_at: r.metadata.created_at.to_rfc3339(),
-        pinned: false, // Not available in RecallResult directly
+        pinned: pins.contains(&r.parent_id.unwrap_or(r.memory_id)),
+        superseded: r.metadata.belief_state == Some(BeliefState::Superseded),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Recall mode
+// ---------------------------------------------------------------------------
+
+/// Tags on rows the app wrote by itself: captured conversation turns
+/// (`runtime::cognitive_intake`) and session-memory artifacts (`runtime::session_memory`).
+/// On a busy agent they are most of the store, and they echo whatever is being asked
+/// about, so recall leaves them out unless asked.
+///
+/// `session-summary` is deliberately absent: agents write those on purpose at the end of
+/// a session and are told to recall them at the start of the next.
+pub const CAPTURED_TAGS: [&str; 3] = ["cognitive_intake", "session_memory", "no_auto_inject"];
+
+/// Who is asking. The engine reinforces what a deliberate recall returns; an automatic
+/// read (context packing, a UI search) must not inflate what it happens to touch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecallIntent {
+    Deliberate,
+    Automatic,
+}
+
+/// Whether rows carrying [`CAPTURED_TAGS`] may be returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapturedRows {
+    Exclude,
+    Include,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecallMode {
+    pub intent: RecallIntent,
+    pub captured: CapturedRows,
+}
+
+impl RecallMode {
+    /// A read the agent did not ask for: no reinforcement, no captured rows.
+    pub const AUTOMATIC: Self = Self {
+        intent: RecallIntent::Automatic,
+        captured: CapturedRows::Exclude,
+    };
+
+    /// The agent called recall on purpose.
+    pub fn deliberate(captured: CapturedRows) -> Self {
+        Self {
+            intent: RecallIntent::Deliberate,
+            captured,
+        }
+    }
+}
+
+fn search_input(
+    query: &str,
+    limit: usize,
+    category: Option<&str>,
+    mode: RecallMode,
+    spaces: Option<SpaceScope>,
+) -> RecallInput {
+    // `category` was previously accepted and discarded — the parameter was
+    // underscore-prefixed, so nothing warned, and `recall(category: "concept")`
+    // silently returned episodes. An unknown category yields no filter rather than
+    // an empty result, matching how `memory_filter` treats one.
+    let filter = category
+        .and_then(category_str_to_kind)
+        .map(|kind| RecallFilter {
+            kind: Some(kind),
+            ..Default::default()
+        });
+
+    RecallInput {
+        query: Some(query.to_string()),
+        memory_id: None,
+        limit,
+        filter,
+        spaces: spaces.unwrap_or(SpaceScope::Private),
+        content_mode: ContentMode::Chunk,
+        search_strategy: SearchStrategy::HybridBm25Inject,
+        exclude_tags: match mode.captured {
+            CapturedRows::Exclude => CAPTURED_TAGS.iter().map(|t| t.to_string()).collect(),
+            CapturedRows::Include => Vec::new(),
+        },
+        reinforce: mode.intent == RecallIntent::Deliberate,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Remember
+// ---------------------------------------------------------------------------
+
+/// Most candidates shown to the agent after a write. Enough to decide on a supersede.
+const SIMILAR_SHOWN: usize = 3;
+
+fn remember_input(
+    content: &str,
+    category: &MemoryCategory,
+    importance: f64,
+    source: &MemorySource,
+    tags: Vec<String>,
+    options: &WriteOptions,
+) -> Result<RememberInput, MemoryError> {
+    let supersedes = options
+        .supersedes
+        .iter()
+        .map(|id| parse_memory_id(id))
+        .collect::<Result<Vec<Uuid>, _>>()?;
+    Ok(RememberInput {
+        content: content.to_string(),
+        metadata: RememberMetadata {
+            kind: Some(category_to_kind(category)),
+            source: Some(source_to_hillock(source)),
+            tags,
+            importance: Some(importance as f32),
+            confidence: None,
+        },
+        supersedes,
+        created_at: None,
+    })
+}
+
+/// What the engine did with a write, in the words the tools report.
+fn store_result(output: &RememberOutput) -> HillockStoreResult {
+    let mut similar: Vec<SimilarMemory> = Vec::new();
+    for c in output
+        .near_duplicates
+        .iter()
+        .chain(output.potential_conflicts.iter())
+    {
+        // The memory the write landed on is not "similar to" itself.
+        if c.memory_id == output.memory_id
+            || similar.iter().any(|s| s.id == c.memory_id.to_string())
+        {
+            continue;
+        }
+        similar.push(SimilarMemory {
+            id: c.memory_id.to_string(),
+            similarity: c.cosine_similarity,
+            preview: c.content_preview.clone(),
+        });
+    }
+    similar.sort_by(|a, b| {
+        b.similarity
+            .partial_cmp(&a.similarity)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    similar.truncate(SIMILAR_SHOWN);
+
+    let (status, message) = if output.deduplicated {
+        (
+            "already_known",
+            "Already known: no new memory was written, the existing one was kept",
+        )
+    } else {
+        ("created", "Memory stored successfully")
+    };
+    HillockStoreResult {
+        memory_id: output.memory_id.to_string(),
+        status: status.to_string(),
+        message: message.to_string(),
+        verification_status: "not_required".to_string(),
+        similar,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pin
+// ---------------------------------------------------------------------------
+
+/// The engine reports a refused pin as `Ok` with `pinned: false`. To a caller that is a
+/// failure, and the reason is the only useful part.
+fn pin_outcome(out: PinOutput) -> Result<u8, MemoryError> {
+    if out.pinned {
+        Ok(out.pin_count)
+    } else {
+        Err(MemoryError::PinRefused(out.error.unwrap_or_else(|| {
+            "the engine refused and gave no reason".to_string()
+        })))
     }
 }
 
@@ -284,9 +471,8 @@ impl EmbeddedHillock {
         let embedder = Arc::new(FastEmbedder::new_bge_base().map_err(|e| {
             MemoryError::Database(format!("Failed to initialize embedding model: {e}"))
         })?);
-        let dim = embedder.dimension();
         tracing::info!(
-            dimension = dim,
+            dimension = embedder.dimension(),
             model = embedder.model_name(),
             "embedder ready"
         );
@@ -295,6 +481,26 @@ impl EmbeddedHillock {
             SqliteStore::open(db_path)
                 .map_err(|e| MemoryError::Database(format!("Failed to open database: {e}")))?,
         );
+        let backup_dir = db_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("backups");
+
+        Self::assemble(store, embedder, agent_id, master_key, aliases, backup_dir).await
+    }
+
+    /// Wire an engine over a store and an embedder that already exist. `try_init` is
+    /// this plus opening the database and loading the model; tests call it directly with
+    /// an in-memory store and the mock embedder.
+    async fn assemble(
+        store: Arc<SqliteStore>,
+        embedder: Arc<dyn hillock_core::embed::Embedder>,
+        agent_id: &str,
+        master_key: &str,
+        aliases: std::collections::HashMap<String, String>,
+        backup_dir: std::path::PathBuf,
+    ) -> Result<Self, MemoryError> {
+        let dim = embedder.dimension();
         let index = Arc::new(MemoryIndex::new(dim));
         let rotation = Arc::new(RotationManager::new(dim));
 
@@ -342,10 +548,7 @@ impl EmbeddedHillock {
             default_agent_id: agent_id.to_string(),
             master_key: master_key.to_string(),
             namespace_aliases: aliases,
-            backup_dir: db_path
-                .parent()
-                .unwrap_or_else(|| Path::new("."))
-                .join("backups"),
+            backup_dir,
         })
     }
 
@@ -382,12 +585,22 @@ impl EmbeddedHillock {
         tags: &[String],
     ) -> Result<String, MemoryError> {
         let result = self
-            .store_detailed(content, category, importance, _source, agent_ns, tags)
+            .store_detailed(
+                content,
+                category,
+                importance,
+                _source,
+                agent_ns,
+                tags,
+                &WriteOptions::default(),
+            )
             .await?;
         Ok(result.memory_id)
     }
 
-    /// Store a memory and return the detailed result.
+    /// Store a memory and return the detailed result: whether a row was created or the
+    /// text was already known, and the nearest existing memories.
+    #[allow(clippy::too_many_arguments)]
     pub async fn store_detailed(
         &self,
         content: &str,
@@ -396,6 +609,7 @@ impl EmbeddedHillock {
         source: &MemorySource,
         agent_ns: &str,
         tags: &[String],
+        options: &WriteOptions,
     ) -> Result<HillockStoreResult, MemoryError> {
         let agent_id = self.resolve_agent_id(agent_ns);
         let mut tags = tags.to_vec();
@@ -404,18 +618,7 @@ impl EmbeddedHillock {
                 tags.push(lane.to_string());
             }
         }
-        let input = RememberInput {
-            content: content.to_string(),
-            metadata: RememberMetadata {
-                kind: Some(category_to_kind(category)),
-                source: Some(source_to_hillock(source)),
-                tags,
-                importance: Some(importance as f32),
-                confidence: None,
-            },
-            supersedes: vec![],
-            created_at: None,
-        };
+        let input = remember_input(content, category, importance, source, tags, options)?;
 
         let output = self
             .engine
@@ -423,12 +626,7 @@ impl EmbeddedHillock {
             .await
             .map_err(|e| MemoryError::Database(format!("Remember failed: {e}")))?;
 
-        Ok(HillockStoreResult {
-            memory_id: output.memory_id.to_string(),
-            status: "created".to_string(),
-            message: "Memory stored successfully".to_string(),
-            verification_status: "not_required".to_string(),
-        })
+        Ok(store_result(&output))
     }
 
     /// Seed a fixture memory (bypasses dedup in the caller, but Engine still runs full pipeline).
@@ -449,6 +647,7 @@ impl EmbeddedHillock {
             &MemorySource::AutoCaptured,
             agent_ns,
             tags,
+            &WriteOptions::default(),
         )
         .await
     }
@@ -459,7 +658,9 @@ impl EmbeddedHillock {
     ///
     /// `spaces` controls which memory spaces are searched. Defaults to
     /// `Private` so agents only see their own namespace unless they
-    /// explicitly opt in to commons or all spaces.
+    /// explicitly opt in to commons or all spaces. `mode` says who is asking
+    /// and whether captured rows may come back.
+    #[allow(clippy::too_many_arguments)]
     pub async fn retrieve(
         &self,
         query: &str,
@@ -467,44 +668,27 @@ impl EmbeddedHillock {
         source_filter: Option<&str>,
         _cluster_ids: Option<&[String]>,
         category: Option<&str>,
-        _recall_mode: Option<&str>,
+        mode: RecallMode,
         spaces: Option<SpaceScope>,
     ) -> Result<HillockRetrieveResult, MemoryError> {
         let agent_id = source_filter
             .map(|s| self.resolve_agent_id(s))
             .unwrap_or_else(|| self.default_agent_id.clone());
 
-        // `category` was previously accepted and discarded — the parameter was
-        // underscore-prefixed, so nothing warned, and `recall(category: "concept")`
-        // silently returned episodes. An unknown category yields no filter rather than
-        // an empty result, matching how `memory_filter` treats one.
-        let filter = category
-            .and_then(category_str_to_kind)
-            .map(|kind| RecallFilter {
-                kind: Some(kind),
-                ..Default::default()
-            });
-
-        let input = RecallInput {
-            query: Some(query.to_string()),
-            memory_id: None,
-            limit,
-            filter,
-            spaces: spaces.unwrap_or(SpaceScope::Private),
-            content_mode: ContentMode::Chunk,
-            search_strategy: SearchStrategy::HybridBm25Inject,
-        };
-
         let output = self
             .engine
-            .recall(&agent_id, input)
+            .recall(
+                &agent_id,
+                search_input(query, limit, category, mode, spaces),
+            )
             .await
             .map_err(|e| MemoryError::Database(format!("Recall failed: {e}")))?;
 
-        let memories: Vec<HillockMemory> = output
+        let pins = self.pins_of(&agent_id).await?;
+        let memories: Vec<RecalledMemory> = output
             .results
             .iter()
-            .map(recall_result_to_hillock_memory)
+            .map(|r| recalled_from(r, &pins))
             .collect();
         let total_found = memories.len();
 
@@ -519,6 +703,78 @@ impl EmbeddedHillock {
             recommended_followup: None,
             highlights: None,
         })
+    }
+
+    /// Fetch one memory by id, whole. Given a fragment's id, returns the memory the
+    /// fragment belongs to. Not a search: nothing is excluded and nothing reinforced.
+    pub async fn fetch(
+        &self,
+        memory_id: &str,
+        agent_ns: &str,
+    ) -> Result<RecalledMemory, MemoryError> {
+        let agent_id = self.resolve_agent_id(agent_ns);
+        let hit = self
+            .fetch_row(&agent_id, parse_memory_id(memory_id)?)
+            .await?;
+
+        // The engine's direct fetch does not check access, and search does. Without this
+        // a memory id would read across agents. A row the caller cannot see is reported
+        // exactly as a row that does not exist.
+        let key_ring = self
+            .store
+            .get_key_ring(&agent_id)
+            .await
+            .map_err(|e| MemoryError::Database(format!("Failed to get key ring: {e}")))?;
+        if !key_ring.iter().any(|k| k.space_id == hit.space_id) {
+            return Err(MemoryError::NotFound(memory_id.to_string()));
+        }
+
+        let whole = match hit.parent_id {
+            Some(parent) => self.fetch_row(&agent_id, parent).await?,
+            None => hit,
+        };
+        Ok(recalled_from(&whole, &self.pins_of(&agent_id).await?))
+    }
+
+    async fn fetch_row(&self, agent_id: &str, id: Uuid) -> Result<RecallResult, MemoryError> {
+        let input = RecallInput {
+            query: None,
+            memory_id: Some(id),
+            limit: 1,
+            filter: None,
+            spaces: SpaceScope::Private,
+            content_mode: ContentMode::Chunk,
+            search_strategy: SearchStrategy::default(),
+            exclude_tags: Vec::new(),
+            reinforce: false,
+        };
+        let output = self.engine.recall(agent_id, input).await.map_err(|e| {
+            match e.downcast_ref::<hillock_core::store::StoreError>() {
+                Some(hillock_core::store::StoreError::NotFound(_)) => {
+                    MemoryError::NotFound(id.to_string())
+                }
+                _ => MemoryError::Database(format!("Fetch failed: {e}")),
+            }
+        })?;
+        output
+            .results
+            .into_iter()
+            .next()
+            .ok_or_else(|| MemoryError::NotFound(id.to_string()))
+    }
+
+    /// The agent's pin table, read once per recall so `pinned` is a fact, not a default.
+    async fn pins_of(
+        &self,
+        agent_id: &str,
+    ) -> Result<std::collections::HashSet<Uuid>, MemoryError> {
+        Ok(self
+            .store
+            .get_pinned(agent_id)
+            .await
+            .map_err(|e| MemoryError::Database(format!("Failed to read pins: {e}")))?
+            .into_iter()
+            .collect())
     }
 
     // ── Filter / Query ───────────────────────────────────────────────
@@ -604,24 +860,80 @@ impl EmbeddedHillock {
         self.engine
             .forget(&agent_id, ForgetInput { memory_id: id })
             .await
-            .map_err(|e| MemoryError::Database(format!("Forget failed: {e}")))?;
+            .map_err(|e| {
+                forget_failure(
+                    memory_id,
+                    e.downcast_ref::<hillock_core::store::StoreError>(),
+                    e.to_string(),
+                )
+            })?;
         Ok(())
     }
 
     // ── Pin / Tier ───────────────────────────────────────────────────
 
-    /// Pin a memory.
-    pub async fn promote(&self, memory_id: &str) -> Result<(), MemoryError> {
-        let id = parse_memory_id(memory_id)?;
-        let agent_id = &self.default_agent_id;
-        self.engine
-            .pin(agent_id, id)
-            .await
-            .map_err(|e| MemoryError::Database(format!("Pin failed: {e}")))?;
-        Ok(())
+    /// Agent id a pin/unpin is recorded under. Pins are per-agent in the engine
+    /// (`pinned_memories.agent_id`), and both the session-start pack and maintenance
+    /// read the *calling* agent's pins, so a pin has to be written under that agent to
+    /// do anything. The default agent is only for callers with no namespace.
+    fn pin_agent_id(&self, agent_ns: Option<&str>) -> String {
+        agent_ns
+            .map(|ns| self.resolve_agent_id(ns))
+            .unwrap_or_else(|| self.default_agent_id.clone())
     }
 
-    /// Pin or unpin a memory.
+    /// Pin a memory for the calling agent. Returns how many pins the agent now holds.
+    /// A refusal (already pinned, a fragment, the cap) is an error with the engine's reason.
+    pub async fn pin(&self, memory_id: &str, agent_ns: Option<&str>) -> Result<u8, MemoryError> {
+        let id = parse_memory_id(memory_id)?;
+        let agent_id = self.pin_agent_id(agent_ns);
+        let out =
+            self.engine.pin(&agent_id, id).await.map_err(|e| match e
+                .downcast_ref::<hillock_core::store::StoreError>()
+            {
+                Some(hillock_core::store::StoreError::NotFound(_)) => {
+                    MemoryError::NotFound(memory_id.to_string())
+                }
+                _ => MemoryError::Database(format!("Pin failed: {e}")),
+            })?;
+        pin_outcome(out)
+    }
+
+    /// Unpin a memory for the calling agent. Returns whether it had been pinned; the
+    /// engine's unpin succeeds either way, so the answer is read before it runs.
+    ///
+    /// Pins made before pins followed the calling agent were all recorded under the
+    /// default agent. One of those is released here too, so an older database cannot
+    /// hold a pin nobody is able to remove.
+    pub async fn unpin(
+        &self,
+        memory_id: &str,
+        agent_ns: Option<&str>,
+    ) -> Result<bool, MemoryError> {
+        let id = parse_memory_id(memory_id)?;
+        let agent_id = self.pin_agent_id(agent_ns);
+        let mut was_pinned = false;
+        for holder in [agent_id.as_str(), self.default_agent_id.as_str()] {
+            let held = self
+                .store
+                .is_pinned(holder, id)
+                .await
+                .map_err(|e| MemoryError::Database(format!("Failed to read pins: {e}")))?;
+            if held {
+                self.engine
+                    .unpin(holder, id)
+                    .await
+                    .map_err(|e| MemoryError::Database(format!("Unpin failed: {e}")))?;
+                was_pinned = true;
+            }
+        }
+        Ok(was_pinned)
+    }
+
+    /// Legacy tier setter, kept for `memory_crystallize`'s "demote the sources" step.
+    /// There are no tiers in the engine: `pinned: Some(true)` pins under the default
+    /// agent and anything else releases a default-agent pin. The memory tools do not use
+    /// this; they go through [`Self::pin`] and [`Self::unpin`].
     pub async fn set_tier(
         &self,
         memory_id: &str,
@@ -778,6 +1090,32 @@ impl EmbeddedHillock {
     }
 
     // ── Maintenance pipelines ────────────────────────────────────────
+
+    /// Every agent id that owns a memory space, in the engine's own naming.
+    pub async fn agents_with_memory(&self) -> Result<Vec<String>, MemoryError> {
+        self.engine
+            .list_agent_ids()
+            .await
+            .map_err(|e| MemoryError::Database(format!("Failed to list memory spaces: {e}")))
+    }
+
+    /// Whether `agent_ns`'s last recorded nightly is at least `max_gap_hours` old, or
+    /// there has never been one.
+    pub async fn is_nightly_overdue(
+        &self,
+        agent_ns: &str,
+        max_gap_hours: u32,
+    ) -> Result<bool, MemoryError> {
+        self.engine
+            .is_nightly_overdue(&self.resolve_agent_id(agent_ns), max_gap_hours)
+            .await
+            .map_err(|e| MemoryError::Database(format!("Failed to read last nightly: {e}")))
+    }
+
+    /// The engine agent id a namespace's memory is kept under.
+    pub fn memory_agent_id(&self, agent_ns: &str) -> String {
+        self.resolve_agent_id(agent_ns)
+    }
 
     /// Trigger nightly maintenance.
     pub async fn run_nightly(
@@ -999,6 +1337,26 @@ impl EmbeddedHillock {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Why a forget did not happen, kept apart from a store fault: the first three are the
+/// caller's to fix, and a tool reports them as such.
+///
+/// `cause` is the engine error's store-level cause when it has one; `text` is the whole
+/// error as the engine printed it.
+fn forget_failure(
+    memory_id: &str,
+    cause: Option<&hillock_core::store::StoreError>,
+    text: String,
+) -> MemoryError {
+    use hillock_core::store::StoreError;
+    match cause {
+        Some(StoreError::NotFound(_)) => MemoryError::NotFound(memory_id.to_string()),
+        Some(refused @ (StoreError::ChunkForgetRejected | StoreError::NotAuthorized { .. })) => {
+            MemoryError::ForgetRefused(refused.to_string())
+        }
+        _ => MemoryError::Database(format!("Forget failed: {text}")),
+    }
+}
+
 fn parse_memory_id(id: &str) -> Result<Uuid, MemoryError> {
     Uuid::parse_str(id)
         .map_err(|e| MemoryError::Validation(format!("Invalid memory ID '{id}': {e}")))
@@ -1014,6 +1372,9 @@ fn parse_space_scope(args: &serde_json::Value) -> SpaceScope {
         Some(_) => SpaceScope::Private, // unknown value → safe default
     }
 }
+
+/// Most rows one `memory_filter` call returns. The tool's schema states this number.
+pub const MEMORY_FILTER_MAX_LIMIT: usize = 50;
 
 fn parse_filter_input(args: &serde_json::Value) -> FilterInput {
     let kind = args
@@ -1031,10 +1392,11 @@ fn parse_filter_input(args: &serde_json::Value) -> FilterInput {
         });
 
     let pinned = args.get("pinned").and_then(|v| parse_bool_lenient(v));
-    let limit = args
+    let limit = (args
         .get("limit")
         .and_then(|v| parse_u64_lenient(v))
-        .unwrap_or(20) as usize;
+        .unwrap_or(20) as usize)
+        .min(MEMORY_FILTER_MAX_LIMIT);
     let importance_min = args
         .get("importance_min")
         .and_then(|v| parse_f64_lenient(v))
@@ -1175,5 +1537,534 @@ mod tests {
         // An unrecognised category applies no filter rather than matching nothing.
         assert_eq!(category_str_to_kind("nonsense"), None);
         assert_eq!(category_str_to_kind(""), None);
+    }
+}
+
+/// Recall modes, honest writes, per-agent pins, fetch by id — over the real engine with
+/// an in-memory store and the deterministic mock embedder (same text, same vector;
+/// different text, unrelated vector). No model download, no disk.
+#[cfg(test)]
+mod recall_and_write_tests {
+    use super::*;
+
+    const AGENT_NS: &str = "holt_sample";
+    const OTHER_NS: &str = "holt_other";
+
+    async fn bridge() -> EmbeddedHillock {
+        let bridge = EmbeddedHillock::assemble(
+            Arc::new(SqliteStore::in_memory().unwrap()),
+            Arc::new(hillock_core::embed::mock::MockEmbedder::new(64)),
+            "default",
+            "test-key",
+            std::collections::HashMap::new(),
+            std::env::temp_dir().join("holt-test-backups-unused"),
+        )
+        .await
+        .unwrap();
+        for ns in [AGENT_NS, OTHER_NS] {
+            bridge.namespace_register(ns, ns).await.unwrap();
+        }
+        bridge
+    }
+
+    async fn remember_as(
+        b: &EmbeddedHillock,
+        agent_ns: &str,
+        content: &str,
+        tags: &[&str],
+    ) -> HillockStoreResult {
+        let tags: Vec<String> = tags.iter().map(|t| t.to_string()).collect();
+        b.store_detailed(
+            content,
+            &MemoryCategory::Concept,
+            0.5,
+            &MemorySource::AgentExplicit,
+            agent_ns,
+            &tags,
+            &WriteOptions::default(),
+        )
+        .await
+        .unwrap()
+    }
+
+    async fn remember(b: &EmbeddedHillock, content: &str, tags: &[&str]) -> HillockStoreResult {
+        remember_as(b, AGENT_NS, content, tags).await
+    }
+
+    fn deliberate() -> RecallMode {
+        RecallMode::deliberate(CapturedRows::Exclude)
+    }
+
+    async fn search(b: &EmbeddedHillock, query: &str, mode: RecallMode) -> Vec<RecalledMemory> {
+        b.retrieve(query, 5, Some(AGENT_NS), None, None, mode, None)
+            .await
+            .unwrap()
+            .memories
+    }
+
+    /// Enough sentences to take the engine's chunked path.
+    fn long_text() -> String {
+        (0..60)
+            .map(|i| format!("Sentence number {i} of a long note about the same subject. "))
+            .collect()
+    }
+
+    // ── Captured rows ───────────────────────────────────────────────
+
+    #[test]
+    fn search_input_excludes_captured_rows_unless_asked() {
+        let quiet = search_input("q", 5, None, RecallMode::AUTOMATIC, None);
+        assert_eq!(quiet.exclude_tags, CAPTURED_TAGS.map(String::from).to_vec());
+        let asked = search_input(
+            "q",
+            5,
+            None,
+            RecallMode::deliberate(CapturedRows::Include),
+            None,
+        );
+        assert!(asked.exclude_tags.is_empty());
+    }
+
+    /// The list names the tags this app's own capture paths write, and nothing an agent
+    /// writes on purpose.
+    #[test]
+    fn captured_tags_are_the_ones_the_app_writes_by_itself() {
+        // Session-memory artifacts: the two fixed tags of every row that path stores.
+        let session_tags =
+            crate::runtime::session_memory::session_memory_bridge_tags("sess-1", "artifact-1");
+        for tag in ["session_memory", "no_auto_inject"] {
+            assert!(session_tags.iter().any(|t| t == tag));
+            assert!(CAPTURED_TAGS.contains(&tag));
+        }
+        // Cognitive intake: the source's own name is the tag it writes.
+        assert!(CAPTURED_TAGS.contains(&MemorySource::CognitiveIntake.to_string().as_str()));
+        // Agents write these deliberately and are told to recall them.
+        assert!(!CAPTURED_TAGS.contains(&"session-summary"));
+    }
+
+    #[tokio::test]
+    async fn session_summaries_are_deliberate_and_stay_in_recall() {
+        let b = bridge().await;
+        let text = "session summary: finished the importer and its tests";
+        let summary = remember(&b, text, &["session-summary"]).await;
+        let hits = search(&b, text, deliberate()).await;
+        assert!(hits.iter().any(|m| m.id == summary.memory_id));
+    }
+
+    #[tokio::test]
+    async fn captured_turns_stay_out_of_recall_until_asked_for() {
+        let b = bridge().await;
+        let query = "[Human] what port\n[Agent] 8080";
+        for tag in CAPTURED_TAGS {
+            let turn = remember(&b, &format!("{query} ({tag})"), &[tag]).await;
+            let ask = format!("{query} ({tag})");
+
+            let default = search(&b, &ask, deliberate()).await;
+            assert!(
+                default.iter().all(|m| m.id != turn.memory_id),
+                "a row tagged {tag} leaked into default recall"
+            );
+            let quiet = search(&b, &ask, RecallMode::AUTOMATIC).await;
+            assert!(quiet.iter().all(|m| m.id != turn.memory_id));
+
+            let asked = search(&b, &ask, RecallMode::deliberate(CapturedRows::Include)).await;
+            assert!(
+                asked.iter().any(|m| m.id == turn.memory_id),
+                "include_captured must bring a row tagged {tag} back"
+            );
+        }
+    }
+
+    // ── Reinforcement ───────────────────────────────────────────────
+
+    #[test]
+    fn only_a_deliberate_recall_reinforces() {
+        assert!(search_input("q", 5, None, deliberate(), None).reinforce);
+        assert!(!search_input("q", 5, None, RecallMode::AUTOMATIC, None).reinforce);
+    }
+
+    #[tokio::test]
+    async fn an_automatic_read_leaves_importance_alone_and_a_deliberate_one_raises_it() {
+        let b = bridge().await;
+        let text = "the release branch is cut on fridays";
+        let m = remember(&b, text, &[]).await;
+        let id = parse_memory_id(&m.memory_id).unwrap();
+        async fn importance(b: &EmbeddedHillock, id: Uuid) -> f32 {
+            b.engine.get_memory(id).await.unwrap().importance.unwrap()
+        }
+        let before = importance(&b, id).await;
+
+        search(&b, text, RecallMode::AUTOMATIC).await;
+        assert_eq!(importance(&b, id).await, before);
+
+        // Session-start packing is automatic too.
+        b.pack_context(AGENT_NS, 2000, "context").await.unwrap();
+        assert_eq!(importance(&b, id).await, before);
+
+        // And so is fetching a memory by id.
+        b.fetch(&m.memory_id, AGENT_NS).await.unwrap();
+        assert_eq!(importance(&b, id).await, before);
+
+        search(&b, text, deliberate()).await;
+        assert!(importance(&b, id).await > before);
+    }
+
+    // ── What a recall hit says ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn a_hit_carries_the_cosine_and_the_asking_agents_pin_state() {
+        let b = bridge().await;
+        let pinned = remember(&b, "the pinned one", &[]).await;
+        let plain = remember(&b, "the plain one", &[]).await;
+        b.pin(&pinned.memory_id, Some(AGENT_NS)).await.unwrap();
+
+        let hits = search(&b, "the pinned one", RecallMode::AUTOMATIC).await;
+        let hit = hits.iter().find(|m| m.id == pinned.memory_id).unwrap();
+        assert!(hit.pinned, "pinned by the asking agent");
+        assert!(
+            hit.cosine > 0.5 && hit.cosine <= 1.0,
+            "cosine {}",
+            hit.cosine
+        );
+
+        let hits = search(&b, "the plain one", RecallMode::AUTOMATIC).await;
+        let hit = hits.iter().find(|m| m.id == plain.memory_id).unwrap();
+        assert!(!hit.pinned);
+    }
+
+    #[test]
+    fn a_fragment_is_pinned_when_its_parent_is() {
+        let parent = Uuid::new_v4();
+        let hit = RecallResult {
+            memory_id: Uuid::new_v4(),
+            content: "a fragment".into(),
+            parent_content: None,
+            metadata: RecallResultMetadata {
+                kind: MemoryKind::Fact,
+                source: hillock_core::model::MemorySource::Agent,
+                tags: vec![],
+                created_at: Utc::now(),
+                importance: None,
+                confidence: None,
+                belief_state: Some(BeliefState::Active),
+                source_agent: None,
+            },
+            score: 0.7,
+            cosine_score: 0.6,
+            space_id: "agent:sample".into(),
+            parent_id: Some(parent),
+            chunk_index: Some(2),
+            chunk_count: Some(4),
+            duplicates: vec![],
+        };
+        let pins = std::collections::HashSet::from([parent]);
+        let m = recalled_from(&hit, &pins);
+        assert!(m.pinned);
+        assert_eq!(m.memory_id(), parent.to_string(), "addressed by its parent");
+        assert_eq!((m.chunk_index, m.chunk_count), (Some(2), Some(4)));
+        assert!((m.cosine - 0.6).abs() < 1e-6 && (m.score - 0.7).abs() < 1e-6);
+        assert!(!recalled_from(&hit, &Default::default()).pinned);
+    }
+
+    // ── Fetch by id ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn fetch_returns_the_whole_memory_even_from_a_fragment_id() {
+        let b = bridge().await;
+        let text = long_text();
+        let stored = remember(&b, &text, &[]).await;
+        let parent = parse_memory_id(&stored.memory_id).unwrap();
+        let fragments = b.store.get_chunks(parent).await.unwrap();
+        assert!(
+            fragments.len() > 1,
+            "the fixture must take the chunked path"
+        );
+
+        let by_parent = b.fetch(&stored.memory_id, AGENT_NS).await.unwrap();
+        assert_eq!(by_parent.content, text);
+        assert!(by_parent.parent_id.is_none());
+
+        let by_fragment = b
+            .fetch(&fragments[1].id.to_string(), AGENT_NS)
+            .await
+            .unwrap();
+        assert_eq!(by_fragment.id, stored.memory_id);
+        assert_eq!(by_fragment.content, text);
+    }
+
+    #[tokio::test]
+    async fn fetch_reaches_captured_rows_and_refuses_what_the_caller_cannot_see() {
+        let b = bridge().await;
+        let turn = remember(&b, "[Human] hi\n[Agent] hello", &["cognitive_intake"]).await;
+        assert_eq!(
+            b.fetch(&turn.memory_id, AGENT_NS).await.unwrap().id,
+            turn.memory_id,
+            "asking by id is not a search: nothing is excluded"
+        );
+
+        // Another agent's memory reads exactly like one that does not exist.
+        let theirs = remember_as(&b, OTHER_NS, "someone else's note", &[]).await;
+        assert!(matches!(
+            b.fetch(&theirs.memory_id, AGENT_NS).await,
+            Err(MemoryError::NotFound(_))
+        ));
+        assert!(matches!(
+            b.fetch(&Uuid::new_v4().to_string(), AGENT_NS).await,
+            Err(MemoryError::NotFound(_))
+        ));
+        assert!(matches!(
+            b.fetch("not-an-id", AGENT_NS).await,
+            Err(MemoryError::Validation(_))
+        ));
+    }
+
+    // ── Remember ────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn a_repeated_write_is_reported_as_already_known() {
+        let b = bridge().await;
+        let first = remember(&b, "config uses port 8080", &[]).await;
+        assert_eq!(first.status, "created");
+
+        let again = remember(&b, "config uses port 8080", &[]).await;
+        assert_eq!(again.status, "already_known");
+        assert_eq!(again.memory_id, first.memory_id);
+        assert!(again.message.contains("no new memory was written"));
+    }
+
+    #[test]
+    fn similar_memories_are_the_nearest_three_and_never_the_write_itself() {
+        let written = Uuid::new_v4();
+        let candidate = |id: Uuid, similarity: f32| ConflictCandidate {
+            memory_id: id,
+            content_preview: format!("preview at {similarity}"),
+            cosine_similarity: similarity,
+            created_at: Utc::now(),
+        };
+        let twice = Uuid::new_v4();
+        let output = RememberOutput {
+            memory_id: written,
+            chunk_count: None,
+            near_duplicates: vec![candidate(written, 1.0), candidate(twice, 0.97)],
+            potential_conflicts: vec![
+                candidate(twice, 0.90),
+                candidate(Uuid::new_v4(), 0.82),
+                candidate(Uuid::new_v4(), 0.88),
+                candidate(Uuid::new_v4(), 0.85),
+            ],
+            deduplicated: false,
+        };
+
+        let result = store_result(&output);
+        assert_eq!(result.status, "created");
+        let shown: Vec<f32> = result.similar.iter().map(|s| s.similarity).collect();
+        assert_eq!(
+            shown,
+            vec![0.97, 0.88, 0.85],
+            "nearest first, three at most"
+        );
+        assert!(result.similar.iter().all(|s| s.id != written.to_string()));
+        assert_eq!(result.similar[0].preview, "preview at 0.97");
+    }
+
+    #[tokio::test]
+    async fn supersedes_hides_the_old_memory_and_a_bad_id_is_a_validation_error() {
+        let b = bridge().await;
+        let old = remember(&b, "the port is 8080", &[]).await;
+        let options = WriteOptions {
+            supersedes: vec![old.memory_id.clone()],
+        };
+        b.store_detailed(
+            "the port is 9090 now",
+            &MemoryCategory::Concept,
+            0.5,
+            &MemorySource::AgentExplicit,
+            AGENT_NS,
+            &[],
+            &options,
+        )
+        .await
+        .unwrap();
+
+        let hits = search(&b, "the port is 8080", deliberate()).await;
+        assert!(
+            hits.iter().all(|m| m.id != old.memory_id),
+            "superseded memories leave recall"
+        );
+        let kept = b.fetch(&old.memory_id, AGENT_NS).await.unwrap();
+        assert!(kept.superseded, "and are kept, not deleted");
+
+        let bad = WriteOptions {
+            supersedes: vec!["not-an-id".into()],
+        };
+        let err = b
+            .store_detailed(
+                "anything",
+                &MemoryCategory::Concept,
+                0.5,
+                &MemorySource::AgentExplicit,
+                AGENT_NS,
+                &[],
+                &bad,
+            )
+            .await;
+        assert!(matches!(err, Err(MemoryError::Validation(_))));
+    }
+
+    // ── Pin / unpin / forget ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn a_pin_is_recorded_under_the_calling_agent() {
+        let b = bridge().await;
+        let m = remember(&b, "worth pinning", &[]).await;
+        let id = parse_memory_id(&m.memory_id).unwrap();
+
+        assert_eq!(b.pin(&m.memory_id, Some(AGENT_NS)).await.unwrap(), 1);
+
+        assert_eq!(b.store.get_pinned("sample").await.unwrap(), vec![id]);
+        assert!(
+            b.store.get_pinned("default").await.unwrap().is_empty(),
+            "not under the default agent, where the caller's session pack never looks"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_pin_is_an_error_with_the_engines_reason() {
+        let b = bridge().await;
+        let m = remember(&b, "pinned once", &[]).await;
+        b.pin(&m.memory_id, Some(AGENT_NS)).await.unwrap();
+
+        match b.pin(&m.memory_id, Some(AGENT_NS)).await {
+            Err(MemoryError::PinRefused(reason)) => {
+                assert!(reason.contains("already pinned"), "{reason}")
+            }
+            other => panic!("a second pin must be refused, got {other:?}"),
+        }
+
+        // A fragment cannot be pinned.
+        let long = remember(&b, &long_text(), &[]).await;
+        let parent = parse_memory_id(&long.memory_id).unwrap();
+        let fragment = b.store.get_chunks(parent).await.unwrap()[0].id;
+        assert!(matches!(
+            b.pin(&fragment.to_string(), Some(AGENT_NS)).await,
+            Err(MemoryError::PinRefused(_))
+        ));
+
+        // A memory that does not exist.
+        assert!(matches!(
+            b.pin(&Uuid::new_v4().to_string(), Some(AGENT_NS)).await,
+            Err(MemoryError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn a_refusal_without_a_reason_still_fails() {
+        let silent = PinOutput {
+            pinned: false,
+            pin_count: 2,
+            error: None,
+        };
+        assert!(matches!(
+            pin_outcome(silent),
+            Err(MemoryError::PinRefused(_))
+        ));
+        let granted = PinOutput {
+            pinned: true,
+            pin_count: 3,
+            error: None,
+        };
+        assert_eq!(pin_outcome(granted).unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn unpin_says_whether_there_was_a_pin_to_release() {
+        let b = bridge().await;
+        let m = remember(&b, "pinned then released", &[]).await;
+        b.pin(&m.memory_id, Some(AGENT_NS)).await.unwrap();
+
+        assert!(b.unpin(&m.memory_id, Some(AGENT_NS)).await.unwrap());
+        assert!(
+            !b.unpin(&m.memory_id, Some(AGENT_NS)).await.unwrap(),
+            "nothing left to release"
+        );
+        assert!(b.store.get_pinned("sample").await.unwrap().is_empty());
+    }
+
+    /// Pins written before pins followed the calling agent sit under the default agent.
+    /// The agent must still be able to release one.
+    #[tokio::test]
+    async fn unpin_releases_a_pin_left_under_the_default_agent() {
+        let b = bridge().await;
+        let m = remember(&b, "pinned the old way", &[]).await;
+        let id = parse_memory_id(&m.memory_id).unwrap();
+        b.store.pin_memory("default", id).await.unwrap();
+
+        assert!(b.unpin(&m.memory_id, Some(AGENT_NS)).await.unwrap());
+        assert!(b.store.get_pinned("default").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn forgetting_releases_the_pin_and_a_refused_forget_is_not_a_store_fault() {
+        let b = bridge().await;
+        let m = remember(&b, "pinned then forgotten", &[]).await;
+        b.pin(&m.memory_id, Some(AGENT_NS)).await.unwrap();
+
+        b.forget(&m.memory_id, AGENT_NS).await.unwrap();
+        assert!(b.store.get_pinned("sample").await.unwrap().is_empty());
+
+        // Already gone.
+        assert!(matches!(
+            b.forget(&m.memory_id, AGENT_NS).await,
+            Err(MemoryError::NotFound(_))
+        ));
+        // Someone else's.
+        let theirs = remember_as(&b, OTHER_NS, "not yours to delete", &[]).await;
+        assert!(matches!(
+            b.forget(&theirs.memory_id, AGENT_NS).await,
+            Err(MemoryError::ForgetRefused(_))
+        ));
+        // A fragment.
+        let long = remember(&b, &long_text(), &[]).await;
+        let parent = parse_memory_id(&long.memory_id).unwrap();
+        let fragment = b.store.get_chunks(parent).await.unwrap()[0].id;
+        match b.forget(&fragment.to_string(), AGENT_NS).await {
+            Err(MemoryError::ForgetRefused(reason)) => {
+                assert!(reason.contains("parent"), "{reason}")
+            }
+            other => panic!("forgetting a fragment must be refused, got {other:?}"),
+        }
+    }
+
+    // ── Filter cap, nightly plumbing ────────────────────────────────
+
+    #[test]
+    fn memory_filter_returns_at_most_fifty_rows() {
+        assert_eq!(MEMORY_FILTER_MAX_LIMIT, 50);
+        let capped = parse_filter_input(&serde_json::json!({ "limit": 500 }));
+        assert_eq!(capped.limit, MEMORY_FILTER_MAX_LIMIT);
+        assert_eq!(
+            parse_filter_input(&serde_json::json!({ "limit": 7 })).limit,
+            7
+        );
+        assert_eq!(parse_filter_input(&serde_json::json!({})).limit, 20);
+    }
+
+    #[tokio::test]
+    async fn the_scheduler_can_list_agents_and_ask_whether_one_is_due() {
+        let b = bridge().await;
+        assert_eq!(
+            b.agents_with_memory().await.unwrap(),
+            vec![
+                "default".to_string(),
+                "other".to_string(),
+                "sample".to_string()
+            ]
+        );
+        assert_eq!(b.memory_agent_id(AGENT_NS), "sample");
+
+        assert!(
+            b.is_nightly_overdue(AGENT_NS, 24).await.unwrap(),
+            "never run: due"
+        );
     }
 }

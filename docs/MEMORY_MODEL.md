@@ -55,10 +55,14 @@ Eight tools: `remember`, `recall`, `memory_filter`, `pin_memory`,
 `unpin_memory`, `forget`, `memory_crystallize`, `memory_cleanup`. A memory
 carries content, a category, importance, tags, and provenance; storing one
 runs a pipeline — content-hash dedup, embed, rotate, a scan for near-
-duplicates and contradictions, chunking for long content. Retrieval is
-hybrid (vector plus SQLite FTS5 full-text, fused) with a small recency
-weight whose value was chosen against a written table, in the source, of
-what each candidate weight would have overturned.
+duplicates and contradictions, chunking for long content. Saving the same
+text twice does not write a second row: the existing memory absorbs the new
+tags and the higher importance, and the tool answers `already_known` instead
+of `created`. Retrieval is hybrid (vector plus SQLite FTS5 full-text, fused)
+with a small recency weight whose value was chosen against a written table,
+in the source, of what each candidate weight would have overturned, plus an
+importance term capped at 0.03 — enough to settle a near-tie, never enough
+to overturn a clearly better match.
 
 The design bet worth noticing: **memory is not force-fed.** Holt does not
 stuff retrieved memories into every turn. An agent's context gets memory
@@ -71,6 +75,14 @@ looking up. (An earlier per-turn relevance-injection pipeline existed; it
 was retired, and the module that housed it now enforces its own absence
 with a test.)
 
+What `recall` searches by default is what was saved on purpose. The app also
+captures rows by itself — raw conversation turns, session-memory artifacts —
+and those echo whatever is being asked about, so they would win on
+similarity and crowd everything else out. They are tagged, left out of
+`recall` unless the agent passes `include_captured`, and never deleted:
+`memory_filter` still lists them and `recall` with a `memory_id` still
+fetches one whole.
+
 The UI shows memories in hot/warm/cold tiers — read that as a *view*, not
 state: hot means pinned, cold means low importance. The engine's own comment
 is blunter: decay is continuous, no tiers.
@@ -78,13 +90,21 @@ is blunter: decay is continuous, no tiers.
 ## Forgetting is engineered, not hoped for
 
 The lifecycle ops are where the scars show. Importance decays continuously
-with age; low-importance memories get pruned; pinned memories are immune to
-all of it. The nightly maintenance run *refuses to proceed* if its database
+with age — but only for observations; what was stored as a fact, a
+preference or a rule holds its value, because being old does not make it
+less true. Use pushes back: a `recall` the agent made on purpose nudges up
+the importance of what it returned (at most once in twenty hours) and spares it from
+decay for thirty days, while automatic reads — the session-start pack, a
+search from the UI — change nothing. Low-importance memories get pruned;
+pinned memories are immune to all of it. Maintenance runs on a schedule
+inside the app: an hourly check runs any agent whose last run is older than
+`[memory] nightly_interval_hours` (24 by default, 0 turns it off) and waits
+if that agent is mid-turn. The run *refuses to proceed* if its database
 backup fails. Crystallization condenses multiple episodes into one concept
 and hides — not deletes — its sources; "superseded" used to mean cleanup and
 now means *kept but excluded from recall*, a change made after a
 decay-cascade deleted 104 memories in a day. Deletions are soft, cascade-
-aware, and audit-logged.
+aware, and audit-logged, and a deleted memory gives up its pin.
 
 Memories can also cross agents, as a modeled operation rather than a shared
 table: sharing un-rotates from the source space and re-rotates into the

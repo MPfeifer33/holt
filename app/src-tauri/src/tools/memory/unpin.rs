@@ -57,25 +57,77 @@ impl Tool for UnpinMemoryTool {
                 retryable: false,
             })?;
 
-        memory_engine
-            .unpin(memory_id)
+        let agent_ns = crate::memory::MemoryEngine::agent_namespace(&context.agent_id);
+
+        let was_pinned = memory_engine
+            .unpin(memory_id, &agent_ns)
             .await
-            .map_err(|e| ToolError {
-                code: ToolErrorCode::InternalError,
-                message: format!("Failed to unpin memory: {e}"),
+            .map_err(unpin_error)?;
+
+        if !was_pinned {
+            // Nothing was released, so this is not a success to report.
+            return Err(ToolError {
+                code: ToolErrorCode::InvalidInput,
+                message: NOT_PINNED_MESSAGE.to_string(),
                 retryable: false,
-            })?;
+            });
+        }
 
         Ok(ToolResult {
             content: json!({
                 "success": true,
                 "memory_id": memory_id,
                 "pinned": false,
-                "message": "Memory unpinned — demoted to warm tier, normal decay resumed"
+                "message": UNPINNED_MESSAGE
             }),
             truncated: false,
             trace_id: None,
             image_content: None,
         })
+    }
+}
+
+/// Unpinning removes the pin row and nothing else. There are no tiers to demote to.
+const UNPINNED_MESSAGE: &str =
+    "Memory unpinned: the slot is free, and the memory decays and ranks like any other again";
+
+/// The engine's unpin succeeds whether or not there was a pin. The tool does not.
+const NOT_PINNED_MESSAGE: &str = "Memory not unpinned: it was not pinned, so nothing changed";
+
+fn unpin_error(e: crate::memory::MemoryError) -> ToolError {
+    use crate::memory::MemoryError;
+    match e {
+        MemoryError::Validation(_) | MemoryError::NotFound(_) => ToolError {
+            code: ToolErrorCode::InvalidInput,
+            message: format!("Memory not unpinned: {e}"),
+            retryable: false,
+        },
+        e => ToolError {
+            code: ToolErrorCode::InternalError,
+            message: format!("Failed to unpin memory: {e}"),
+            retryable: false,
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_result_says_what_unpinning_did() {
+        for text in [UNPINNED_MESSAGE, NOT_PINNED_MESSAGE] {
+            assert!(!text.contains("tier"), "there are no tiers: {text}");
+        }
+        assert!(UNPINNED_MESSAGE.contains("unpinned"));
+        assert!(NOT_PINNED_MESSAGE.contains("not pinned"));
+    }
+
+    #[test]
+    fn a_malformed_id_is_the_callers_error() {
+        let err = unpin_error(crate::memory::MemoryError::Validation(
+            "Invalid memory ID".into(),
+        ));
+        assert!(matches!(err.code, ToolErrorCode::InvalidInput));
     }
 }

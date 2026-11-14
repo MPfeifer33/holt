@@ -63,21 +63,18 @@ impl Tool for PinTool {
 
         let agent_ns = crate::memory::MemoryEngine::agent_namespace(&context.agent_id);
 
-        memory_engine
+        let pin_count = memory_engine
             .pin(memory_id, &agent_ns)
             .await
-            .map_err(|e| ToolError {
-                code: ToolErrorCode::InternalError,
-                message: format!("Failed to pin memory: {e}"),
-                retryable: false,
-            })?;
+            .map_err(pin_error)?;
 
         Ok(ToolResult {
             content: json!({
                 "success": true,
                 "memory_id": memory_id,
                 "pinned": true,
-                "message": "Memory pinned successfully — always injected, never decays"
+                "pin_count": pin_count,
+                "message": PINNED_MESSAGE
             }),
             truncated: false,
             trace_id: None,
@@ -86,10 +83,73 @@ impl Tool for PinTool {
     }
 }
 
+/// Says what the description says and no more: a pin is first into the pack, within its
+/// budget. It used to read "always injected".
+const PINNED_MESSAGE: &str =
+    "Memory pinned: exempt from decay and pruning, and packed first into your \
+     session-start context within that pack's token budget";
+
+/// A pin the engine or the cap refused is the caller's to fix, and the reason says how.
+/// It used to come back as a success message.
+fn pin_error(e: crate::memory::MemoryError) -> ToolError {
+    use crate::memory::MemoryError;
+    match e {
+        MemoryError::PinRefused(reason) => ToolError {
+            code: ToolErrorCode::InvalidInput,
+            message: format!("Memory not pinned: {reason}"),
+            retryable: false,
+        },
+        MemoryError::PinCapReached(_)
+        | MemoryError::PinTooLarge(_)
+        | MemoryError::Validation(_)
+        | MemoryError::NotFound(_) => ToolError {
+            code: ToolErrorCode::InvalidInput,
+            message: format!("Memory not pinned: {e}"),
+            retryable: false,
+        },
+        e => ToolError {
+            code: ToolErrorCode::InternalError,
+            message: format!("Failed to pin memory: {e}"),
+            retryable: false,
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use hillock_core::ops::pin::MAX_PINS;
+
+    #[test]
+    fn an_engine_refusal_reaches_the_agent_as_an_error_with_its_reason() {
+        let refusal = crate::memory::MemoryError::PinRefused(
+            "cannot pin a chunk — pin the parent instead".into(),
+        );
+        let err = pin_error(refusal);
+        assert!(matches!(err.code, ToolErrorCode::InvalidInput));
+        assert_eq!(
+            err.message,
+            "Memory not pinned: cannot pin a chunk — pin the parent instead"
+        );
+    }
+
+    #[test]
+    fn a_pin_on_a_missing_memory_is_the_callers_error() {
+        let err = pin_error(crate::memory::MemoryError::NotFound("abc".into()));
+        assert!(matches!(err.code, ToolErrorCode::InvalidInput));
+        assert!(
+            err.message.starts_with("Memory not pinned:"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn the_success_text_promises_no_more_than_the_description() {
+        assert!(!PINNED_MESSAGE.contains("always"), "{PINNED_MESSAGE}");
+        assert!(PINNED_MESSAGE.contains("token budget"), "{PINNED_MESSAGE}");
+        assert!(PinTool.description().contains("token budget"));
+    }
 
     /// The advertised cap must be the enforced cap.
     ///

@@ -26,7 +26,7 @@ use std::sync::Arc;
 
 use super::embeddings::{count_tokens, EmbeddingService};
 use super::session::SessionState;
-use super::types::HillockMemory;
+use super::types::RecalledMemory;
 use super::MemoryEngine;
 use super::MemoryError;
 use serde::Serialize;
@@ -139,7 +139,8 @@ pub async fn build_memory_context_legacy(
                 agent_ns,
                 None,
                 None,
-                Some("injection"),
+                // Not a question the agent asked: nothing reinforced, no captured rows.
+                super::RecallMode::AUTOMATIC,
                 Some(hillock_core::model::SpaceScope::All),
             )
             .await
@@ -184,7 +185,7 @@ pub async fn build_memory_context_legacy(
 
 /// Format a single memory for injection.
 /// Uses category instead of tier (more useful to the agent).
-fn format_memory_line(mem: &HillockMemory) -> String {
+fn format_memory_line(mem: &RecalledMemory) -> String {
     let date = if mem.created_at.len() >= 10 {
         &mem.created_at[5..10]
     } else {

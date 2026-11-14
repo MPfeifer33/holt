@@ -8,7 +8,10 @@ pub mod types;
 
 use self::embeddings::EmbeddingService;
 use self::hillock_engine::EmbeddedHillock;
-use self::types::{HillockMemory, HillockRetrieveResult, HillockStoreResult};
+pub use self::hillock_engine::{
+    CapturedRows, RecallIntent, RecallMode, CAPTURED_TAGS, MEMORY_FILTER_MAX_LIMIT,
+};
+use self::types::{HillockMemory, HillockRetrieveResult, HillockStoreResult, RecalledMemory};
 use crate::config::app_config::MemoryBlock;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -31,6 +34,12 @@ pub enum MemoryError {
     PinCapReached(String),
     #[error("Memory too large to pin: {0}")]
     PinTooLarge(String),
+    /// The engine declined a pin (already pinned, a fragment, its own cap) and said why.
+    #[error("{0}")]
+    PinRefused(String),
+    /// The engine declined a delete (a fragment, a space the caller holds no key for).
+    #[error("{0}")]
+    ForgetRefused(String),
 }
 
 pub struct MemoryEngine {
@@ -119,6 +128,16 @@ impl MemoryEngine {
         &self,
         input: store::StoreInput,
     ) -> Result<HillockStoreResult, MemoryError> {
+        self.store_with(input, &store::WriteOptions::default())
+            .await
+    }
+
+    /// Store a memory that supersedes others.
+    pub async fn store_with(
+        &self,
+        input: store::StoreInput,
+        options: &store::WriteOptions,
+    ) -> Result<HillockStoreResult, MemoryError> {
         self.hillock
             .store_detailed(
                 &input.content,
@@ -127,6 +146,7 @@ impl MemoryEngine {
                 &input.source,
                 &input.agent_ns,
                 &input.tags,
+                options,
             )
             .await
     }
@@ -162,7 +182,10 @@ impl MemoryEngine {
     ///
     /// `spaces` controls which memory spaces are searched. Defaults to
     /// `Private` (agent's own namespace only). Pass `Some(SpaceScope::All)`
-    /// to include commons.
+    /// to include commons. `mode` says whether the agent asked on purpose (which
+    /// reinforces what comes back) and whether automatically captured rows may be
+    /// returned.
+    #[allow(clippy::too_many_arguments)]
     pub async fn retrieve(
         &self,
         query: &str,
@@ -170,7 +193,7 @@ impl MemoryEngine {
         agent_ns: &str,
         cluster_ids: Option<&[String]>,
         category: Option<&str>,
-        recall_mode: Option<&str>,
+        mode: RecallMode,
         spaces: Option<hillock_core::model::SpaceScope>,
     ) -> Result<HillockRetrieveResult, MemoryError> {
         self.hillock
@@ -180,10 +203,15 @@ impl MemoryEngine {
                 Some(agent_ns),
                 cluster_ids,
                 category,
-                recall_mode,
+                mode,
                 spaces,
             )
             .await
+    }
+
+    /// Fetch one whole memory by id (a fragment's id returns the memory it belongs to).
+    pub async fn fetch(&self, id: &str, agent_ns: &str) -> Result<RecalledMemory, MemoryError> {
+        self.hillock.fetch(id, agent_ns).await
     }
 
     /// Get memories by tier, optionally scoped to a namespace.
@@ -241,13 +269,9 @@ impl MemoryEngine {
         self.hillock.set_tier(id, tier, None).await
     }
 
-    /// Promote a memory to hot tier.
-    pub async fn promote(&self, id: &str) -> Result<(), MemoryError> {
-        self.hillock.promote(id).await
-    }
-
-    /// Pin a memory: validate cap (max 5) and token size (~1K), promote to hot, set pinned=true.
-    pub async fn pin(&self, id: &str, agent_ns: &str) -> Result<(), MemoryError> {
+    /// Pin a memory: validate cap (max 5) and token size (~1K), then pin it for the
+    /// calling agent. Returns how many pins that agent now holds.
+    pub async fn pin(&self, id: &str, agent_ns: &str) -> Result<u8, MemoryError> {
         // Check pinned cap
         let hot = self.hillock.get_by_tier("hot", 50, Some(agent_ns)).await?;
         let pinned_count = hot.iter().filter(|m| m.pinned).count();
@@ -283,13 +307,13 @@ impl MemoryEngine {
             }
         }
 
-        // Promote to hot + set pinned flag
-        self.hillock.set_tier(id, "hot", Some(true)).await
+        // Recorded under the calling agent. The engine can still refuse, and says why.
+        self.hillock.pin(id, Some(agent_ns)).await
     }
 
-    /// Unpin a memory: clear pinned flag and demote to warm.
-    pub async fn unpin(&self, id: &str) -> Result<(), MemoryError> {
-        self.hillock.set_tier(id, "warm", Some(false)).await
+    /// Unpin a memory. Returns whether it had been pinned.
+    pub async fn unpin(&self, id: &str, agent_ns: &str) -> Result<bool, MemoryError> {
+        self.hillock.unpin(id, Some(agent_ns)).await
     }
 
     /// Send feedback on a memory.
@@ -322,6 +346,28 @@ impl MemoryEngine {
         dry_run: bool,
     ) -> Result<serde_json::Value, MemoryError> {
         self.hillock.run_nightly(agent_ns, dry_run).await
+    }
+
+    /// Every agent id that owns a memory space, in the engine's naming.
+    pub async fn agents_with_memory(&self) -> Result<Vec<String>, MemoryError> {
+        self.hillock.agents_with_memory().await
+    }
+
+    /// Whether the agent's last recorded nightly is at least `max_gap_hours` old.
+    pub async fn is_nightly_overdue(
+        &self,
+        agent_ns: &str,
+        max_gap_hours: u32,
+    ) -> Result<bool, MemoryError> {
+        self.hillock
+            .is_nightly_overdue(agent_ns, max_gap_hours)
+            .await
+    }
+
+    /// The engine agent id an app agent's memory is kept under (aliases applied).
+    pub fn memory_agent_id_for(&self, app_agent_id: &str) -> String {
+        self.hillock
+            .memory_agent_id(&Self::agent_namespace(app_agent_id))
     }
 
     /// Generate the agent namespace string.

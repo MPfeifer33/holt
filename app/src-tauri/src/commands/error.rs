@@ -153,9 +153,10 @@ impl From<crate::memory::MemoryError> for CommandError {
             MemoryError::NotFound(_) => Self::not_found(err.to_string()),
             MemoryError::Validation(_) => Self::internal(err.to_string()),
             MemoryError::ToolError(_) => Self::internal(err.to_string()),
-            MemoryError::PinCapReached(_) | MemoryError::PinTooLarge(_) => {
-                Self::internal(err.to_string())
-            }
+            MemoryError::PinCapReached(_)
+            | MemoryError::PinTooLarge(_)
+            | MemoryError::PinRefused(_)
+            | MemoryError::ForgetRefused(_) => Self::internal(err.to_string()),
             MemoryError::Database(_) | MemoryError::Embedding(_) | MemoryError::Unavailable => {
                 Self::internal(err.to_string())
             }

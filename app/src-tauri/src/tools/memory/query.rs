@@ -103,3 +103,22 @@ impl Tool for MemoryQueryTool {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::memory::MEMORY_FILTER_MAX_LIMIT;
+
+    /// The cap is enforced where the limit is parsed; this keeps the prose beside it.
+    #[test]
+    fn the_schema_states_the_cap_the_engine_enforces() {
+        let schema = MemoryQueryTool.parameters_schema();
+        let limit = schema["properties"]["limit"]["description"]
+            .as_str()
+            .unwrap();
+        assert!(
+            limit.contains(&format!("max {MEMORY_FILTER_MAX_LIMIT}")),
+            "{limit}"
+        );
+    }
+}

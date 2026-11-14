@@ -727,6 +727,10 @@ fn start_background_tasks(state: Arc<AppState>, app_handle: tauri::AppHandle) {
         .vfl_registry
         .spawn_reaper(state.shutdown_token.clone());
 
+    // Memory nightly: decay, prune and pin cleanup for each agent whose last run is
+    // older than `[memory] nightly_interval_hours` (0 disables).
+    crate::runtime::nightly_scheduler::spawn(state.clone());
+
     // Plugin initialization
     {
         let plugin_host_init = state.plugin_host.clone();

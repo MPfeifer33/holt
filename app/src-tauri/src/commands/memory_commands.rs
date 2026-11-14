@@ -151,13 +151,14 @@ pub async fn search_memories(
     let agent_ns = crate::memory::MemoryEngine::agent_namespace(&agent_id);
 
     let result = engine
+        // The person browsing is not the agent recalling: nothing is reinforced.
         .retrieve(
             &query,
             limit.unwrap_or(20),
             &agent_ns,
             None,
             None,
-            None,
+            crate::memory::RecallMode::AUTOMATIC,
             None,
         )
         .await
@@ -169,7 +170,8 @@ pub async fn search_memories(
         .map(|r| MemoryEntry {
             id: r.id.clone(),
             content: r.content.clone(),
-            tier: r.tier,
+            // Same convention as the list view's rows: a pin is the only tier there is.
+            tier: if r.pinned { "hot" } else { "warm" }.to_string(),
             category: r.category,
             score: r.score,
             source: r.source,

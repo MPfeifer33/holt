@@ -103,3 +103,11 @@ pub struct StoreInput {
     pub tier: MemoryTier,
     pub tags: Vec<String>,
 }
+
+/// How a write relates to what is already stored. Separate from [`StoreInput`] because
+/// most writes have nothing to say here.
+#[derive(Debug, Clone, Default)]
+pub struct WriteOptions {
+    /// Memory ids this write replaces. They are kept, marked superseded, and leave recall.
+    pub supersedes: Vec<String>,
+}
