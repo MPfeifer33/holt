@@ -33,8 +33,9 @@ pub struct Memory {
     /// BLAKE3 hash of normalized content, for dedup detection.
     pub content_hash: [u8; 32],
 
-    // ── Retained signals (stored, filterable, NOT used for ranking) ──
-    /// Agent-assigned importance at creation. Inactive for ranking.
+    // ── Retained signals (stored, filterable) ──
+    /// Agent-assigned importance at creation. Carries a small weight in ranking
+    /// (`ScoringConfig::importance_weight`); decays by kind, reinforced by recall.
     pub importance: Option<f32>,
     /// Agent-assigned confidence. Inactive for ranking.
     pub confidence: Option<f32>,
@@ -162,6 +163,11 @@ pub struct RememberOutput {
     pub near_duplicates: Vec<ConflictCandidate>,
     #[serde(default)]
     pub potential_conflicts: Vec<ConflictCandidate>,
+    /// True when no new row was written and `memory_id` names an existing memory: the
+    /// content hash matched exactly. The existing row absorbs the new tags and
+    /// importance, and is made active again if it had been superseded.
+    #[serde(default)]
+    pub deduplicated: bool,
 }
 
 /// A memory surfaced during conflict-candidate scanning.
@@ -194,6 +200,22 @@ pub struct RecallInput {
     /// Search strategy (default: cosine_only).
     #[serde(default)]
     pub search_strategy: SearchStrategy,
+    /// Drop every candidate whose memory carries any of these tags.
+    ///
+    /// Exists for rows a host captures by itself (raw conversation turns, session
+    /// artifacts): they echo whatever is being asked about, win on cosine, and crowd out
+    /// the memories someone chose to write down. Nothing is deleted and the rows stay
+    /// reachable by id; they just stop competing in semantic search. Applies to vector
+    /// and FTS candidates alike, and to fragments through their own tags. Ignored by
+    /// direct fetch. Empty = no exclusion.
+    #[serde(default)]
+    pub exclude_tags: Vec<String>,
+    /// Count this recall as a use of what it returns (see
+    /// `ScoringConfig::recall_reinforcement`). True only for a question an agent asked on
+    /// purpose. Context packing, counting, evals and automatic injection leave it false:
+    /// they read memory without anyone having wanted the answer.
+    #[serde(default)]
+    pub reinforce: bool,
 }
 
 fn default_limit() -> usize {
@@ -584,6 +606,18 @@ pub struct MaintenanceConfig {
     /// at 30-minute intervals on 2026-07-03. Set to 0 to decay on every run — useful in
     /// tests that simulate consecutive days, but it restores the compounding.
     pub decay_min_interval_hours: u32,
+    /// Kinds whose importance decays (default: observations only).
+    ///
+    /// Decay used to apply to every kind, so given enough time every row came to rest at
+    /// the floor, facts and preferences included, and importance said nothing. What
+    /// someone prefers or decided does not get less true with age; what was merely
+    /// noticed does. Empty = nothing decays.
+    pub decay_kinds: Vec<MemoryKind>,
+    /// A memory recalled within this many days is not decayed (default: 30).
+    ///
+    /// Read from `last_recalled_at`, which recall stamps when it reinforces a result.
+    /// Set to 0 to ignore recall when selecting decay candidates.
+    pub decay_recall_grace_days: u32,
     /// Report what maintenance *would* do without touching the store (default: false).
     ///
     /// Every count in `MaintenanceOutput` becomes a projection: rows are selected exactly
@@ -614,6 +648,8 @@ impl Default for MaintenanceConfig {
             // Matches the nightly overdue threshold, so a normal daily run is never
             // skipped while a same-day rerun is.
             decay_min_interval_hours: 20,
+            decay_kinds: vec![MemoryKind::Observation],
+            decay_recall_grace_days: 30,
             dry_run: false,
         }
     }
@@ -625,6 +661,9 @@ pub struct MaintenanceOutput {
     pub memories_decayed: u32,
     pub memories_pruned: u32,
     pub tombstones_cleaned: u32,
+    /// Pin rows removed because their memory is missing or deleted.
+    #[serde(default)]
+    pub dangling_pins_removed: u32,
     pub duration_ms: u64,
 }
 
@@ -748,6 +787,9 @@ pub struct NightlyOutput {
     pub memories_decayed: u32,
     pub memories_pruned: u32,
     pub tombstones_cleaned: u32,
+    /// Pin rows removed because their memory is missing or deleted.
+    #[serde(default)]
+    pub dangling_pins_removed: u32,
 
     // ── Overall ──
     pub total_duration_ms: u64,
@@ -819,7 +861,27 @@ pub struct ScoringConfig {
     /// different question — "the best X that is also Y" — and needs a wide enough pool for
     /// the Y to exist in it.
     pub filtered_min_candidates: usize,
+    /// Weight of importance, added after the cosine/recency blend (default: 0.03).
+    ///
+    /// Additive on purpose: `score += importance × w`, so the most this term can ever
+    /// contribute is `w`. At 0.03 it settles matches that are otherwise comparable and
+    /// cannot overturn a 0.05 cosine edge (worth `0.05 × 0.98 = 0.049`). Relevance still
+    /// decides. 0 restores the previous ranking exactly.
+    pub importance_weight: f32,
+    /// Importance added to a memory when a recall that asked for it
+    /// (`RecallInput::reinforce`) returns it (default: 0.02).
+    ///
+    /// At most once per memory per [`RECALL_REINFORCEMENT_INTERVAL_HOURS`], capped at 1.0.
+    /// Being useful is the one signal that should push against decay. 0 disables the
+    /// write entirely, so recall is read-only whatever the caller asks.
+    pub recall_reinforcement: f32,
 }
+
+/// Minimum hours between two reinforcements of the same memory.
+///
+/// Matches the decay interval: one bump per day at most, however many times a busy
+/// session recalls the same thing.
+pub const RECALL_REINFORCEMENT_INTERVAL_HOURS: u32 = 20;
 
 impl Default for ScoringConfig {
     fn default() -> Self {
@@ -828,6 +890,8 @@ impl Default for ScoringConfig {
             oversample_factor: 4,
             min_candidates: 500,
             filtered_min_candidates: 5000,
+            importance_weight: 0.03,
+            recall_reinforcement: 0.02,
         }
     }
 }

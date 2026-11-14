@@ -37,8 +37,15 @@ pub enum StoreError {
 pub trait MemoryStore: Send + Sync {
     // ── Memory CRUD ──
 
-    /// Store a memory. Commits transactionally.
+    /// Store a memory. The row and its full-text entry commit together.
     async fn insert_memory(&self, memory: &Memory) -> Result<(), StoreError>;
+
+    /// Store several memories in one transaction: every row is written, or none is.
+    ///
+    /// For a long memory's parent and fragments, which are one memory to the caller. A
+    /// parent without its fragments owns the content hash and can never be found by
+    /// meaning, so a partial write is worse than no write.
+    async fn insert_memories(&self, memories: &[Memory]) -> Result<(), StoreError>;
 
     /// Retrieve a memory by ID.
     async fn get_memory(&self, id: Uuid) -> Result<Memory, StoreError>;
@@ -49,10 +56,11 @@ pub trait MemoryStore: Send + Sync {
     /// Get the parent memory for a chunk.
     async fn get_parent(&self, chunk_id: Uuid) -> Result<Memory, StoreError>;
 
-    /// Delete a standalone memory by ID.
+    /// Delete a standalone memory by ID. Its pins go with it, in the same transaction.
     async fn delete_memory(&self, id: Uuid) -> Result<(), StoreError>;
 
-    /// Delete a parent and all its chunks. Returns count of deleted memories.
+    /// Delete a parent and all its chunks, and their pins, in one transaction.
+    /// Returns count of deleted memories.
     async fn delete_parent_and_chunks(&self, parent_id: Uuid) -> Result<u32, StoreError>;
 
     /// Check if a memory is a chunk (has parent_id set).
@@ -64,6 +72,26 @@ pub trait MemoryStore: Send + Sync {
     /// Update belief_state for a list of memory IDs (for supersedes).
     async fn update_belief_state(&self, ids: &[Uuid], state: BeliefState)
         -> Result<(), StoreError>;
+
+    /// Fold a repeated write into an existing memory: union `tags` into its tags and
+    /// raise its importance to `importance` if that is higher. Never lowers or removes.
+    /// Applied to the memory's fragments too, which carry their parent's metadata.
+    async fn merge_tags_and_importance(
+        &self,
+        id: Uuid,
+        tags: &[String],
+        importance: Option<f32>,
+    ) -> Result<(), StoreError>;
+
+    /// Add `amount` to the importance of each memory not reinforced in the last
+    /// `min_interval_hours` (capped at 1.0) and stamp it as recalled now. One
+    /// transaction for the whole set. Returns how many rows were reinforced.
+    async fn reinforce_recalled(
+        &self,
+        ids: &[Uuid],
+        amount: f32,
+        min_interval_hours: u32,
+    ) -> Result<u32, StoreError>;
 
     /// Update importance for a single memory (feedback signal).
     async fn update_importance(&self, id: Uuid, importance: f32) -> Result<(), StoreError>;
@@ -147,13 +175,22 @@ pub trait MemoryStore: Send + Sync {
     /// Get all pinned memory IDs for an agent.
     async fn get_pinned(&self, agent_id: &str) -> Result<Vec<Uuid>, StoreError>;
 
+    /// Count an agent's pins whose memory is missing or deleted. Backs `dry_run`.
+    async fn count_dangling_pins(&self, agent_id: &str) -> Result<u32, StoreError>;
+
+    /// Remove an agent's pins whose memory is missing or deleted. Returns how many.
+    async fn remove_dangling_pins(&self, agent_id: &str) -> Result<u32, StoreError>;
+
     /// Check if a memory is pinned by an agent.
     async fn is_pinned(&self, agent_id: &str, memory_id: Uuid) -> Result<bool, StoreError>;
 
     // ── Maintenance ──
 
-    /// Fetch decay candidates: non-pinned, non-chunk memories older than `min_age_days`
-    /// with importance above `floor`. Paginated for memory efficiency.
+    /// Fetch decay candidates: non-pinned, non-chunk memories of one of `kinds`, older
+    /// than `min_age_days`, with importance above `floor`, and not recalled within
+    /// `recall_grace_days` (0 = ignore recall). No kinds, no candidates. Paginated for
+    /// memory efficiency.
+    #[allow(clippy::too_many_arguments)]
     async fn decay_candidates(
         &self,
         space_ids: &[String],
@@ -161,6 +198,8 @@ pub trait MemoryStore: Send + Sync {
         min_age_days: u32,
         importance_floor: f32,
         min_interval_hours: u32,
+        kinds: &[MemoryKind],
+        recall_grace_days: u32,
         limit: usize,
         offset: usize,
     ) -> Result<Vec<DecayCandidate>, StoreError>;

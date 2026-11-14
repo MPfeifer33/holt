@@ -1,11 +1,18 @@
 //! The `recall` operation — retrieval pipeline.
 //!
-//! Three search strategies:
-//!   CosineOnly:       embed → rotate per space → HNSW → recency boost → filter → dedup
-//!   HybridBm25Inject: HNSW candidates + FTS5 candidates → compute cosine for FTS-only → recency boost → filter → dedup
-//!   HybridRrf:        HNSW ranked list + FTS5 ranked list → RRF merge → recency boost → filter → dedup
+//! Every strategy shares one shape:
+//!   embed → rotate per space → vector candidates (+ FTS5 candidates for the hybrids)
+//!   → drop excluded tags → merge by strategy → score → filter → dedup → reinforce
+//!
+//! Strategies differ only in the merge:
+//!   CosineOnly:       vector candidates as they are
+//!   HybridBm25Inject: BM25 boosts vector candidates and injects keyword-only ones when cosine is weak
+//!   HybridRrf:        reciprocal rank fusion of the two ranked lists
+//!
+//! Score: `cosine × (1 − w_r) + recency × w_r`, plus `importance × w_i`. See
+//! `ScoringConfig` for why each weight is what it is.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::embed::Embedder;
 use crate::index::VectorIndex;
@@ -26,6 +33,7 @@ pub async fn recall(
     input: RecallInput,
 ) -> Result<RecallOutput, anyhow::Error> {
     // ── Direct fetch mode ──
+    // Asking for a memory by id is not a search: no exclusion, no reinforcement.
     if let Some(memory_id) = input.memory_id {
         return direct_fetch(store, memory_id, input.content_mode).await;
     }
@@ -37,6 +45,7 @@ pub async fn recall(
         .ok_or_else(|| anyhow::anyhow!("recall requires either query or memory_id"))?;
 
     let now = Utc::now();
+    let excluded_tags = excluded_tag_set(&input.exclude_tags);
 
     // 1. Resolve which spaces to search
     let key_ring = store.get_key_ring(agent_id).await?;
@@ -50,13 +59,18 @@ pub async fn recall(
     // *after* it is cut, so anything matching the filter but outside the cosine top-N was
     // unreachable. Asking for "the best X that is also a decision" requires enough
     // candidates for the decisions to appear at all.
-    let floor = if input.filter.is_some() {
+    //
+    // Excluding tags is the same question from the other side — "the best X that is not a
+    // captured turn" — and captured turns can be most of a store, so the narrow pool can
+    // be nothing but rows about to be dropped.
+    let narrows_the_pool = input.filter.is_some() || !excluded_tags.is_empty();
+    let floor = if narrows_the_pool {
         scoring.filtered_min_candidates
     } else {
         scoring.min_candidates
     };
     let candidate_limit = (input.limit * scoring.oversample_factor).max(floor);
-    let (hnsw_candidates, rotated_queries) = hnsw_search_all_spaces(
+    let (mut vector_candidates, _rotated_queries) = hnsw_search_all_spaces(
         index,
         rotation,
         &search_spaces,
@@ -65,39 +79,27 @@ pub async fn recall(
     )
     .await?;
 
-    // 4. Branch on strategy to produce final candidate list
-    let mut all_candidates = match input.search_strategy {
-        SearchStrategy::CosineOnly => hnsw_candidates,
-        SearchStrategy::HybridBm25Inject => {
-            bm25_inject(
-                store,
-                &hnsw_candidates,
-                &rotated_queries,
-                query,
-                &search_spaces,
-                candidate_limit,
-            )
-            .await?
-        }
-        SearchStrategy::HybridRrf => {
-            rrf_merge(
-                store,
-                &hnsw_candidates,
-                query,
-                &search_spaces,
-                candidate_limit,
-            )
-            .await?
+    // 4. Keyword candidates, for the strategies that use them
+    let mut keyword_candidates = match input.search_strategy {
+        SearchStrategy::CosineOnly => Vec::new(),
+        SearchStrategy::HybridBm25Inject | SearchStrategy::HybridRrf => {
+            store
+                .fts_search(query, &search_spaces, candidate_limit)
+                .await?
         }
     };
 
     // 5. Load metadata for all candidates (batch)
     let mut memories: HashMap<Uuid, Memory> = HashMap::new();
-    for c in &all_candidates {
-        if !memories.contains_key(&c.memory_id) {
-            match store.get_memory(c.memory_id).await {
+    let candidate_ids = vector_candidates
+        .iter()
+        .map(|c| c.memory_id)
+        .chain(keyword_candidates.iter().map(|c| c.memory_id));
+    for memory_id in candidate_ids {
+        if !memories.contains_key(&memory_id) {
+            match store.get_memory(memory_id).await {
                 Ok(m) => {
-                    memories.insert(c.memory_id, m);
+                    memories.insert(memory_id, m);
                 }
                 Err(StoreError::NotFound(_)) => continue, // tombstoned
                 Err(e) => return Err(e.into()),
@@ -105,11 +107,42 @@ pub async fn recall(
         }
     }
 
-    // 6. Apply recency boost
+    // 6. Drop excluded tags from both lists *before* they are merged. The merges
+    // normalise against the best candidate and rank by position, so a row that is about
+    // to be dropped must not get to set the scale or take a rank.
+    if !excluded_tags.is_empty() {
+        let excluded = |id: &Uuid| {
+            memories
+                .get(id)
+                .is_some_and(|m| m.tags.iter().any(|t| excluded_tags.contains(t)))
+        };
+        vector_candidates.retain(|c| !excluded(&c.memory_id));
+        keyword_candidates.retain(|c| !excluded(&c.memory_id));
+    }
+
+    // 7. Merge by strategy
+    let mut all_candidates = match input.search_strategy {
+        SearchStrategy::CosineOnly => vector_candidates,
+        SearchStrategy::HybridBm25Inject => bm25_inject(&vector_candidates, &keyword_candidates),
+        SearchStrategy::HybridRrf => rrf_merge(&vector_candidates, &keyword_candidates),
+    };
+
+    // 8. Apply recency boost
     for c in &mut all_candidates {
         if let Some(mem) = memories.get(&c.memory_id) {
             let recency = recency_score(mem.created_at, now);
             c.final_score = blend_score(c.cosine_score, recency, scoring.recency_weight);
+        }
+    }
+
+    // 8b. Importance: added last, so its ceiling is its weight whatever came before.
+    // A fragment is scored on its own importance.
+    if scoring.importance_weight != 0.0 {
+        for c in &mut all_candidates {
+            if let Some(mem) = memories.get(&c.memory_id) {
+                c.final_score =
+                    add_importance(c.final_score, mem.importance, scoring.importance_weight);
+            }
         }
     }
 
@@ -120,7 +153,7 @@ pub async fn recall(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    // 7. Exclude superseded memories (always, unless caller explicitly requests a belief_state)
+    // 9. Exclude superseded memories (always, unless caller explicitly requests a belief_state)
     let caller_wants_superseded = input
         .filter
         .as_ref()
@@ -136,7 +169,7 @@ pub async fn recall(
         });
     }
 
-    // 8. Apply remaining filters
+    // 10. Apply remaining filters
     if let Some(ref filter) = input.filter {
         all_candidates.retain(|c| {
             if let Some(mem) = memories.get(&c.memory_id) {
@@ -147,10 +180,10 @@ pub async fn recall(
         });
     }
 
-    // 9. Deduplicate
+    // 11. Deduplicate
     let deduped = deduplicate(&all_candidates, &memories);
 
-    // 10. Truncate and build results
+    // 12. Truncate and build results
     let mut results = Vec::new();
     for entry in deduped.into_iter().take(input.limit) {
         let mem = match memories.get(&entry.primary.memory_id) {
@@ -191,7 +224,74 @@ pub async fn recall(
     // A contradiction check used to run here on every recall, against a table where 1 in 4
     // live memories was flagged and nothing was ever resolvable. Removed 2026-07-26.
 
+    // 13. Reinforce what was returned, when the caller asked a question on purpose.
+    if input.reinforce {
+        reinforce(store, &memories, &results, scoring.recall_reinforcement).await;
+    }
+
     Ok(RecallOutput { results })
+}
+
+// ── Exclusion ─────────────────────────────────────────────────────
+
+/// The tags to exclude, as written and as `remember` would have stored them, so
+/// `"Cognitive Intake"` and `"cognitive_intake"` name the same rows.
+fn excluded_tag_set(exclude_tags: &[String]) -> HashSet<String> {
+    exclude_tags
+        .iter()
+        .map(|t| t.trim().to_string())
+        .chain(normalize_tags(exclude_tags))
+        .filter(|t| !t.is_empty())
+        .collect()
+}
+
+// ── Importance ────────────────────────────────────────────────────
+
+/// Add the importance term to an already-blended score.
+///
+/// Additive, not blended: the term is worth at most `weight`, and a memory with no
+/// importance simply gets nothing.
+fn add_importance(score: f32, importance: Option<f32>, weight: f32) -> f32 {
+    score + importance.unwrap_or(0.0).clamp(0.0, 1.0) * weight
+}
+
+// ── Reinforcement ─────────────────────────────────────────────────
+
+/// Raise the importance of the memories a recall returned, in one store call.
+///
+/// A fragment reinforces its parent: the parent row is the memory, and the row decay
+/// reads. Never fails the recall — the caller asked a question and has its answer; a
+/// missed bump is a warning in the log.
+async fn reinforce(
+    store: &dyn MemoryStore,
+    memories: &HashMap<Uuid, Memory>,
+    results: &[RecallResult],
+    amount: f32,
+) {
+    if amount <= 0.0 || results.is_empty() {
+        return;
+    }
+    let mut ids: Vec<Uuid> = results
+        .iter()
+        .map(|r| {
+            memories
+                .get(&r.memory_id)
+                .and_then(|m| m.parent_id)
+                .unwrap_or(r.memory_id)
+        })
+        .collect();
+    ids.sort();
+    ids.dedup();
+
+    if let Err(e) = store
+        .reinforce_recalled(&ids, amount, RECALL_REINFORCEMENT_INTERVAL_HOURS)
+        .await
+    {
+        tracing::warn!(
+            count = ids.len(),
+            "recall: failed to record reinforcement: {e}"
+        );
+    }
 }
 
 // ── HNSW Search (shared) ──────────────────────────────────────────
@@ -245,21 +345,14 @@ async fn hnsw_search_all_spaces(
 /// For candidates found in BOTH HNSW and FTS: boost their cosine score by a BM25 factor.
 /// For candidates found ONLY in FTS: use normalized BM25 as their content score.
 /// This ensures that strong keyword matches surface even when embedding similarity is low.
-async fn bm25_inject(
-    store: &dyn MemoryStore,
+fn bm25_inject(
     hnsw_candidates: &[ScoredCandidate],
-    _rotated_queries: &HashMap<String, Vec<f32>>,
-    query: &str,
-    search_spaces: &[String],
-    limit: usize,
-) -> Result<Vec<ScoredCandidate>, anyhow::Error> {
+    fts_results: &[FtsResult],
+) -> Vec<ScoredCandidate> {
     let mut all = hnsw_candidates.to_vec();
 
-    // Run FTS5 search
-    let fts_results = store.fts_search(query, search_spaces, limit).await?;
-
     if fts_results.is_empty() {
-        return Ok(all);
+        return all;
     }
 
     // Normalize BM25 scores to [0, 1]
@@ -281,7 +374,7 @@ async fn bm25_inject(
     // When cosine is weak (<0.55), the model failed — trust keywords.
     let cosine_is_weak = max_hnsw_cosine < 0.55;
 
-    for fts in &fts_results {
+    for fts in fts_results {
         let normalized_bm25 = if max_bm25 > 0.0 {
             fts.bm25_score / max_bm25
         } else {
@@ -308,7 +401,7 @@ async fn bm25_inject(
         // else: FTS-only + strong cosine → skip injection (cosine already found good results)
     }
 
-    Ok(all)
+    all
 }
 
 // ── Strategy B: Reciprocal Rank Fusion ────────────────────────────
@@ -318,13 +411,10 @@ async fn bm25_inject(
 /// Candidates appearing in both lists get boosted (dual-source signal).
 /// The key insight: max_possible = 1/(K+1) per source = 2/(K+1) for dual-source.
 /// Normalizing by max_possible (not max_observed) preserves the dual-source advantage.
-async fn rrf_merge(
-    store: &dyn MemoryStore,
+fn rrf_merge(
     hnsw_candidates: &[ScoredCandidate],
-    query: &str,
-    search_spaces: &[String],
-    limit: usize,
-) -> Result<Vec<ScoredCandidate>, anyhow::Error> {
+    fts_results: &[FtsResult],
+) -> Vec<ScoredCandidate> {
     const K: f32 = 60.0;
 
     // HNSW ranked list (sorted by cosine desc)
@@ -334,9 +424,6 @@ async fn rrf_merge(
             .partial_cmp(&a.cosine_score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-
-    // FTS5 ranked list
-    let fts_results = store.fts_search(query, search_spaces, limit).await?;
 
     // Compute RRF scores
     let mut rrf_scores: HashMap<Uuid, (f32, String, bool, bool)> = HashMap::new(); // (score, space, in_hnsw, in_fts)
@@ -368,7 +455,7 @@ async fn rrf_merge(
     // but FTS finds it, the embedding model has failed — trust keyword match.
     let single_source_max = 1.0 / (K + 1.0);
 
-    let candidates: Vec<ScoredCandidate> = rrf_scores
+    rrf_scores
         .into_iter()
         .map(|(memory_id, (rrf_score, space_id, in_hnsw, in_fts))| {
             let mut normalized = rrf_score / single_source_max;
@@ -386,9 +473,7 @@ async fn rrf_merge(
                 final_score: 0.0,
             }
         })
-        .collect();
-
-    Ok(candidates)
+        .collect()
 }
 
 // ── Chunk Content Resolution ──────────────────────────────────────

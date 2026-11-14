@@ -8,7 +8,12 @@
 //!
 //! Design principles:
 //! - Pinned memories are immune to all maintenance.
-//! - No self-reinforcing loops — retrieval does not boost future retrieval.
+//! - Decay is by kind: observations fade; what was stated as fact, preference,
+//!   constraint, procedure or decision holds (`MaintenanceConfig::decay_kinds`).
+//! - Use pushes back: a memory recalled recently is not decayed, and a recall that asks
+//!   for it adds a small, rate-limited bump (`ScoringConfig::recall_reinforcement`).
+//!   This replaced "retrieval does not boost future retrieval": with nothing pushing
+//!   back, every row drifts to the floor and importance stops meaning anything.
 //! - Decay is continuous, not step-wise. No tiers.
 //! - SQLite is source of truth.
 
@@ -37,9 +42,17 @@ pub async fn run(
             memories_decayed: 0,
             memories_pruned: 0,
             tombstones_cleaned: 0,
+            // No spaces, but pins are per agent, not per space.
+            dangling_pins_removed: run_pin_cleanup(store, agent_id, &config).await?,
             duration_ms: start.elapsed().as_millis() as u64,
         });
     }
+
+    // Stage 0: Pins whose memory is gone.
+    //
+    // First, so the pin list read below names only memories that exist. Deletes clean
+    // up their own pins now; this catches the ones left from before they did.
+    let dangling_pins_removed = run_pin_cleanup(store, agent_id, &config).await?;
 
     // Get pinned IDs upfront — these are exempt from everything
     let pinned_ids = store.get_pinned(agent_id).await?;
@@ -71,13 +84,34 @@ pub async fn run(
         memories_decayed,
         memories_pruned,
         tombstones_cleaned,
+        dangling_pins_removed,
         duration_ms: start.elapsed().as_millis() as u64,
     })
 }
 
+/// Stage 0: Remove the agent's pins whose memory is missing or deleted.
+///
+/// A dangling pin holds one of the agent's few slots for nothing. On a dry run the
+/// count is the projection and nothing is removed.
+async fn run_pin_cleanup(
+    store: &dyn MemoryStore,
+    agent_id: &str,
+    config: &MaintenanceConfig,
+) -> Result<u32, anyhow::Error> {
+    if config.dry_run {
+        return Ok(store.count_dangling_pins(agent_id).await?);
+    }
+    let removed = store.remove_dangling_pins(agent_id).await?;
+    if removed > 0 {
+        tracing::info!(agent = %agent_id, removed, "removed pins whose memory is gone");
+    }
+    Ok(removed)
+}
+
 /// Stage 1: Importance decay.
 ///
-/// For each eligible memory: `new_importance = max(importance * decay_factor, decay_floor)`
+/// For each eligible memory: `new_importance = max(importance * decay_factor, decay_floor)`.
+/// Eligible means of a kind that decays, and not recalled inside the grace window.
 async fn run_decay(
     store: &dyn MemoryStore,
     space_ids: &[String],
@@ -102,6 +136,8 @@ async fn run_decay(
                 config.decay_min_age_days,
                 config.decay_floor,
                 config.decay_min_interval_hours,
+                &config.decay_kinds,
+                config.decay_recall_grace_days,
                 config.batch_size,
                 offset,
             )
@@ -258,5 +294,7 @@ mod tests {
         assert!((config.prune_threshold - 0.05).abs() < 0.001);
         assert_eq!(config.prune_min_age_days, 30);
         assert_eq!(config.batch_size, 500);
+        assert_eq!(config.decay_kinds, vec![MemoryKind::Observation]);
+        assert_eq!(config.decay_recall_grace_days, 30);
     }
 }

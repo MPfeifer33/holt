@@ -52,6 +52,7 @@ impl SqliteStore {
 
         Self::migrate_superseded_at(&conn)?;
         Self::migrate_last_decayed_at(&conn)?;
+        Self::migrate_last_recalled_at(&conn)?;
         Self::migrate_content_hash_unique(&conn)?;
 
         // Backfill FTS index from any existing data (idempotent)
@@ -106,6 +107,18 @@ impl SqliteStore {
     fn migrate_last_decayed_at(conn: &rusqlite::Connection) -> Result<(), StoreError> {
         if Self::ensure_memories_column(conn, "last_decayed_at", "TEXT")? {
             tracing::info!("migrated memories.last_decayed_at");
+        }
+        Ok(())
+    }
+
+    /// Add `memories.last_recalled_at` to databases created before it existed.
+    ///
+    /// Left NULL for existing rows: NULL means "never reinforced by a recall", which is
+    /// the truth, and keeps every existing row eligible for one reinforcement and for
+    /// decay exactly as before the column existed.
+    fn migrate_last_recalled_at(conn: &rusqlite::Connection) -> Result<(), StoreError> {
+        if Self::ensure_memories_column(conn, "last_recalled_at", "TEXT")? {
+            tracing::info!("migrated memories.last_recalled_at");
         }
         Ok(())
     }
@@ -214,6 +227,8 @@ const SCHEMA_SQL: &str = r#"
                                              -- Retention is measured from THIS, not created_at.
         last_decayed_at TEXT,                -- last importance decay. NULL = never decayed.
                                              -- Makes decay idempotent within an interval.
+        last_recalled_at TEXT,               -- when a recall last reinforced this row; NULL = never.
+                                             -- Rate-limits reinforcement and exempts the row from decay.
 
         -- Chunking
         parent_id       TEXT REFERENCES memories(id),
@@ -263,66 +278,19 @@ const SCHEMA_SQL: &str = r#"
 #[async_trait]
 impl MemoryStore for SqliteStore {
     async fn insert_memory(&self, memory: &Memory) -> Result<(), StoreError> {
-        let conn = self.conn.lock().map_err(lock_err)?;
+        self.insert_memories(std::slice::from_ref(memory)).await
+    }
 
-        let embedding_blob = memory.embedding.as_ref().map(|e| f32s_to_bytes(e));
-        let tags_json = serde_json::to_string(&memory.tags).unwrap_or_else(|_| "[]".to_string());
-        let belief_str = memory.belief_state.map(belief_to_str);
-
-        conn.execute(
-            "INSERT INTO memories (
-                id, content, embedding, space_id,
-                kind, source, tags, created_at, content_hash,
-                importance, confidence, belief_state,
-                parent_id, chunk_index, is_chunk,
-                source_agent, source_memory, source_space, shared_at
-            ) VALUES (
-                ?1, ?2, ?3, ?4,
-                ?5, ?6, ?7, ?8, ?9,
-                ?10, ?11, ?12,
-                ?13, ?14, ?15,
-                ?16, ?17, ?18, ?19
-            )",
-            params![
-                memory.id.to_string(),
-                memory.content,
-                embedding_blob,
-                memory.space_id,
-                kind_to_str(memory.kind),
-                source_to_str(memory.source),
-                tags_json,
-                memory.created_at.to_rfc3339(),
-                memory.content_hash.as_slice(),
-                memory.importance,
-                memory.confidence,
-                belief_str,
-                memory.parent_id.map(|u| u.to_string()),
-                memory.chunk_index,
-                memory.is_chunk as i32,
-                memory.source_agent,
-                memory.source_memory.map(|u| u.to_string()),
-                memory.source_space,
-                memory.shared_at.map(|t| t.to_rfc3339()),
-            ],
-        )
-        .map_err(|e| StoreError::Internal(anyhow::anyhow!("insert memory: {e}")))?;
-
-        // Update space memory count
-        conn.execute(
-            "UPDATE spaces SET memory_count = memory_count + 1 WHERE id = ?1",
-            params![memory.space_id],
-        )
-        .map_err(|e| StoreError::Internal(anyhow::anyhow!("update space count: {e}")))?;
-
-        // Sync FTS5 index
-        conn.execute(
-            "INSERT INTO memories_fts(rowid, content)
-             SELECT rowid, content FROM memories WHERE id = ?1",
-            params![memory.id.to_string()],
-        )
-        .map_err(|e| StoreError::Internal(anyhow::anyhow!("fts insert: {e}")))?;
-
-        Ok(())
+    async fn insert_memories(&self, memories: &[Memory]) -> Result<(), StoreError> {
+        let mut conn = self.conn.lock().map_err(lock_err)?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| StoreError::Internal(anyhow::anyhow!("insert memories tx: {e}")))?;
+        for memory in memories {
+            insert_memory_row(&tx, memory)?;
+        }
+        tx.commit()
+            .map_err(|e| StoreError::Internal(anyhow::anyhow!("insert memories commit: {e}")))
     }
 
     async fn get_memory(&self, id: Uuid) -> Result<Memory, StoreError> {
@@ -377,17 +345,20 @@ impl MemoryStore for SqliteStore {
     }
 
     async fn delete_memory(&self, id: Uuid) -> Result<(), StoreError> {
-        let conn = self.conn.lock().map_err(lock_err)?;
+        let mut conn = self.conn.lock().map_err(lock_err)?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| StoreError::Internal(anyhow::anyhow!("delete memory tx: {e}")))?;
 
         // Remove from FTS before soft-delete
-        conn.execute(
+        tx.execute(
             "DELETE FROM memories_fts WHERE rowid = (SELECT rowid FROM memories WHERE id = ?1)",
             params![id.to_string()],
         )
         .map_err(|e| StoreError::Internal(anyhow::anyhow!("fts delete: {e}")))?;
 
         let now = Utc::now().to_rfc3339();
-        let affected = conn
+        let affected = tx
             .execute(
                 "UPDATE memories SET deleted_at = ?1 WHERE id = ?2 AND deleted_at IS NULL",
                 params![now, id.to_string()],
@@ -395,17 +366,39 @@ impl MemoryStore for SqliteStore {
             .map_err(|e| StoreError::Internal(anyhow::anyhow!("delete memory: {e}")))?;
 
         if affected == 0 {
+            // Dropping the transaction rolls back the FTS delete above.
             return Err(StoreError::NotFound(id));
         }
-        Ok(())
+        remove_dependents(&tx, &[id.to_string()])?;
+        tx.commit()
+            .map_err(|e| StoreError::Internal(anyhow::anyhow!("delete memory commit: {e}")))
     }
 
     async fn delete_parent_and_chunks(&self, parent_id: Uuid) -> Result<u32, StoreError> {
-        let conn = self.conn.lock().map_err(lock_err)?;
+        let mut conn = self.conn.lock().map_err(lock_err)?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| StoreError::Internal(anyhow::anyhow!("delete cascade tx: {e}")))?;
         let now = Utc::now().to_rfc3339();
 
+        // The rows about to go, read before they are marked deleted.
+        let doomed: Vec<String> = {
+            let mut stmt = tx
+                .prepare(
+                    "SELECT id FROM memories
+                      WHERE (id = ?1 OR parent_id = ?1) AND deleted_at IS NULL",
+                )
+                .map_err(|e| StoreError::Internal(anyhow::anyhow!("delete cascade ids: {e}")))?;
+            let ids = stmt
+                .query_map(params![parent_id.to_string()], |row| row.get(0))
+                .map_err(|e| StoreError::Internal(anyhow::anyhow!("delete cascade ids: {e}")))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| StoreError::Internal(anyhow::anyhow!("delete cascade ids: {e}")))?;
+            ids
+        };
+
         // Remove from FTS before soft-delete
-        conn.execute(
+        tx.execute(
             "DELETE FROM memories_fts WHERE rowid IN (
                 SELECT rowid FROM memories WHERE (id = ?1 OR parent_id = ?1) AND deleted_at IS NULL
             )",
@@ -414,7 +407,7 @@ impl MemoryStore for SqliteStore {
         .map_err(|e| StoreError::Internal(anyhow::anyhow!("fts delete cascade: {e}")))?;
 
         // Soft-delete chunks
-        let chunks_deleted = conn
+        let chunks_deleted = tx
             .execute(
                 "UPDATE memories SET deleted_at = ?1 WHERE parent_id = ?2 AND deleted_at IS NULL",
                 params![now, parent_id.to_string()],
@@ -422,12 +415,16 @@ impl MemoryStore for SqliteStore {
             .map_err(|e| StoreError::Internal(anyhow::anyhow!("delete chunks: {e}")))?;
 
         // Soft-delete parent
-        let parent_deleted = conn
+        let parent_deleted = tx
             .execute(
                 "UPDATE memories SET deleted_at = ?1 WHERE id = ?2 AND deleted_at IS NULL",
                 params![now, parent_id.to_string()],
             )
             .map_err(|e| StoreError::Internal(anyhow::anyhow!("delete parent: {e}")))?;
+
+        remove_dependents(&tx, &doomed)?;
+        tx.commit()
+            .map_err(|e| StoreError::Internal(anyhow::anyhow!("delete cascade commit: {e}")))?;
 
         Ok((chunks_deleted + parent_deleted) as u32)
     }
@@ -491,6 +488,105 @@ impl MemoryStore for SqliteStore {
         }
 
         Ok(())
+    }
+
+    async fn merge_tags_and_importance(
+        &self,
+        id: Uuid,
+        tags: &[String],
+        importance: Option<f32>,
+    ) -> Result<(), StoreError> {
+        let mut conn = self.conn.lock().map_err(lock_err)?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| StoreError::Internal(anyhow::anyhow!("merge tags tx: {e}")))?;
+
+        // The row and its fragments: fragments carry the parent's tags and importance,
+        // and recall reads both off the fragment.
+        let rows: Vec<(String, String)> = {
+            let mut stmt = tx
+                .prepare(
+                    "SELECT id, tags FROM memories
+                      WHERE (id = ?1 OR parent_id = ?1) AND deleted_at IS NULL",
+                )
+                .map_err(|e| StoreError::Internal(anyhow::anyhow!("merge tags read: {e}")))?;
+            let rows = stmt
+                .query_map(params![id.to_string()], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })
+                .map_err(|e| StoreError::Internal(anyhow::anyhow!("merge tags read: {e}")))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| StoreError::Internal(anyhow::anyhow!("merge tags read: {e}")))?;
+            rows
+        };
+        if rows.is_empty() {
+            return Err(StoreError::NotFound(id));
+        }
+
+        for (row_id, tags_json) in rows {
+            let mut merged: Vec<String> = serde_json::from_str(&tags_json).unwrap_or_default();
+            merged.extend(tags.iter().cloned());
+            merged.sort();
+            merged.dedup();
+            let merged_json = serde_json::to_string(&merged).unwrap_or(tags_json);
+            tx.execute(
+                "UPDATE memories
+                    SET tags = ?2,
+                        importance = CASE
+                            WHEN ?3 IS NULL THEN importance
+                            WHEN importance IS NULL OR importance < ?3 THEN ?3
+                            ELSE importance
+                        END
+                  WHERE id = ?1",
+                params![row_id, merged_json, importance.map(|v| v as f64)],
+            )
+            .map_err(|e| StoreError::Internal(anyhow::anyhow!("merge tags write: {e}")))?;
+        }
+
+        tx.commit()
+            .map_err(|e| StoreError::Internal(anyhow::anyhow!("merge tags commit: {e}")))
+    }
+
+    async fn reinforce_recalled(
+        &self,
+        ids: &[Uuid],
+        amount: f32,
+        min_interval_hours: u32,
+    ) -> Result<u32, StoreError> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let mut conn = self.conn.lock().map_err(lock_err)?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| StoreError::Internal(anyhow::anyhow!("reinforce tx: {e}")))?;
+        let now = Utc::now();
+        let cutoff = now - chrono::Duration::hours(min_interval_hours as i64);
+
+        let mut reinforced = 0u32;
+        for id in ids {
+            reinforced += tx
+                .execute(
+                    "UPDATE memories
+                        SET importance = MIN(COALESCE(importance, ?4) + ?2, 1.0),
+                            last_recalled_at = ?3
+                      WHERE id = ?1 AND deleted_at IS NULL
+                        AND (last_recalled_at IS NULL OR last_recalled_at < ?5)",
+                    params![
+                        id.to_string(),
+                        amount as f64,
+                        now.to_rfc3339(),
+                        UNSET_IMPORTANCE_BASELINE,
+                        cutoff.to_rfc3339(),
+                    ],
+                )
+                .map_err(|e| StoreError::Internal(anyhow::anyhow!("reinforce: {e}")))?
+                as u32;
+        }
+
+        tx.commit()
+            .map_err(|e| StoreError::Internal(anyhow::anyhow!("reinforce commit: {e}")))?;
+        Ok(reinforced)
     }
 
     async fn update_importance(&self, id: Uuid, importance: f32) -> Result<(), StoreError> {
@@ -1001,6 +1097,31 @@ impl MemoryStore for SqliteStore {
         Ok(ids)
     }
 
+    async fn count_dangling_pins(&self, agent_id: &str) -> Result<u32, StoreError> {
+        let conn = self.conn.lock().map_err(lock_err)?;
+        let n: i64 = conn
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM pinned_memories WHERE agent_id = ?1 AND {DANGLING_PIN}"
+                ),
+                params![agent_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| StoreError::Internal(anyhow::anyhow!("count dangling pins: {e}")))?;
+        Ok(n as u32)
+    }
+
+    async fn remove_dangling_pins(&self, agent_id: &str) -> Result<u32, StoreError> {
+        let conn = self.conn.lock().map_err(lock_err)?;
+        let n = conn
+            .execute(
+                &format!("DELETE FROM pinned_memories WHERE agent_id = ?1 AND {DANGLING_PIN}"),
+                params![agent_id],
+            )
+            .map_err(|e| StoreError::Internal(anyhow::anyhow!("remove dangling pins: {e}")))?;
+        Ok(n as u32)
+    }
+
     async fn is_pinned(&self, agent_id: &str, memory_id: Uuid) -> Result<bool, StoreError> {
         let conn = self.conn.lock().map_err(lock_err)?;
         let count: i64 = conn
@@ -1121,10 +1242,13 @@ impl MemoryStore for SqliteStore {
         min_age_days: u32,
         importance_floor: f32,
         min_interval_hours: u32,
+        kinds: &[MemoryKind],
+        recall_grace_days: u32,
         limit: usize,
         offset: usize,
     ) -> Result<Vec<DecayCandidate>, StoreError> {
-        if space_ids.is_empty() {
+        // No kinds decay: nothing is a candidate. (An empty `IN ()` is also not SQL.)
+        if space_ids.is_empty() || kinds.is_empty() {
             return Ok(Vec::new());
         }
 
@@ -1162,6 +1286,28 @@ impl MemoryStore for SqliteStore {
             format!("AND m.id NOT IN ({placeholders})")
         };
 
+        let kind_placeholders: String = kinds
+            .iter()
+            .map(|kind| {
+                let p = format!("?{param_idx}");
+                params_vec.push(Box::new(kind_to_str(*kind).to_string()));
+                param_idx += 1;
+                p
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        // Recalled inside the grace window: in use, so it holds its importance.
+        let recall_exemption = if recall_grace_days == 0 {
+            String::new()
+        } else {
+            let recall_cutoff = Utc::now() - chrono::Duration::days(recall_grace_days as i64);
+            params_vec.push(Box::new(recall_cutoff.to_rfc3339()));
+            let p = format!("?{param_idx}");
+            param_idx += 1;
+            format!("AND (m.last_recalled_at IS NULL OR m.last_recalled_at < {p})")
+        };
+
         params_vec.push(Box::new(cutoff.to_rfc3339()));
         let cutoff_param = format!("?{param_idx}");
         param_idx += 1;
@@ -1192,6 +1338,8 @@ impl MemoryStore for SqliteStore {
                AND m.created_at < {cutoff_param}
                AND COALESCE(m.importance, 0.5) > {floor_param}
                AND (m.last_decayed_at IS NULL OR m.last_decayed_at < {decay_cutoff_param})
+               AND m.kind IN ({kind_placeholders})
+               {recall_exemption}
                {pinned_exclusion}
              ORDER BY m.created_at ASC
              LIMIT {limit_param} OFFSET {offset_param}"
@@ -1554,6 +1702,101 @@ impl MemoryStore for SqliteStore {
     }
 
     // ── Contradiction Detection ──
+}
+
+// ── Write Helpers ───────────────────────────────────────────────────
+
+/// What recall adds its reinforcement to when a memory has no importance yet.
+/// The decay floor: an unrated memory starts where a fully decayed one rests.
+const UNSET_IMPORTANCE_BASELINE: f64 = 0.05;
+
+/// A pin whose memory is missing or soft-deleted. Used as a `WHERE` fragment on
+/// `pinned_memories` so the count and the delete cannot select different rows.
+const DANGLING_PIN: &str = "NOT EXISTS (
+    SELECT 1 FROM memories m
+     WHERE m.id = pinned_memories.memory_id AND m.deleted_at IS NULL)";
+
+/// Insert one memory: the row, the space's count and the FTS entry.
+///
+/// Takes a connection so the caller decides the transaction. These three statements
+/// used to autocommit one by one, so a failure between them left a row that keyword
+/// search could not find.
+fn insert_memory_row(conn: &Connection, memory: &Memory) -> Result<(), StoreError> {
+    let embedding_blob = memory.embedding.as_ref().map(|e| f32s_to_bytes(e));
+    let tags_json = serde_json::to_string(&memory.tags).unwrap_or_else(|_| "[]".to_string());
+    let belief_str = memory.belief_state.map(belief_to_str);
+
+    conn.execute(
+        "INSERT INTO memories (
+            id, content, embedding, space_id,
+            kind, source, tags, created_at, content_hash,
+            importance, confidence, belief_state,
+            parent_id, chunk_index, is_chunk,
+            source_agent, source_memory, source_space, shared_at
+        ) VALUES (
+            ?1, ?2, ?3, ?4,
+            ?5, ?6, ?7, ?8, ?9,
+            ?10, ?11, ?12,
+            ?13, ?14, ?15,
+            ?16, ?17, ?18, ?19
+        )",
+        params![
+            memory.id.to_string(),
+            memory.content,
+            embedding_blob,
+            memory.space_id,
+            kind_to_str(memory.kind),
+            source_to_str(memory.source),
+            tags_json,
+            memory.created_at.to_rfc3339(),
+            memory.content_hash.as_slice(),
+            memory.importance,
+            memory.confidence,
+            belief_str,
+            memory.parent_id.map(|u| u.to_string()),
+            memory.chunk_index,
+            memory.is_chunk as i32,
+            memory.source_agent,
+            memory.source_memory.map(|u| u.to_string()),
+            memory.source_space,
+            memory.shared_at.map(|t| t.to_rfc3339()),
+        ],
+    )
+    .map_err(|e| StoreError::Internal(anyhow::anyhow!("insert memory: {e}")))?;
+
+    // Update space memory count
+    conn.execute(
+        "UPDATE spaces SET memory_count = memory_count + 1 WHERE id = ?1",
+        params![memory.space_id],
+    )
+    .map_err(|e| StoreError::Internal(anyhow::anyhow!("update space count: {e}")))?;
+
+    // Sync FTS5 index
+    conn.execute(
+        "INSERT INTO memories_fts(rowid, content)
+         SELECT rowid, content FROM memories WHERE id = ?1",
+        params![memory.id.to_string()],
+    )
+    .map_err(|e| StoreError::Internal(anyhow::anyhow!("fts insert: {e}")))?;
+
+    Ok(())
+}
+
+/// Remove everything that names deleted memories by id. Runs inside the deleting
+/// transaction.
+///
+/// Pins are the only table that does. They were not cleaned before, so a deleted memory
+/// kept one of its agent's few pin slots. `forget_log` also names memories by id and is
+/// deliberately left alone: it is the record that they were deleted.
+fn remove_dependents(conn: &Connection, memory_ids: &[String]) -> Result<(), StoreError> {
+    for id in memory_ids {
+        conn.execute(
+            "DELETE FROM pinned_memories WHERE memory_id = ?1",
+            params![id],
+        )
+        .map_err(|e| StoreError::Internal(anyhow::anyhow!("remove pins: {e}")))?;
+    }
+    Ok(())
 }
 
 // ── Conversion Helpers ──────────────────────────────────────────────
@@ -2427,5 +2670,142 @@ mod content_hash_index_tests {
         SqliteStore::migrate_content_hash_unique(&conn)
             .expect("duplicate chunk hashes must not block the index");
         assert!(index_exists(&conn));
+    }
+}
+
+/// The `last_recalled_at` column: added in place to a database that predates it, and
+/// present on a fresh one.
+#[cfg(test)]
+mod last_recalled_at_tests {
+    use super::*;
+
+    fn has_last_recalled_at(conn: &rusqlite::Connection) -> bool {
+        conn.prepare("SELECT 1 FROM pragma_table_info('memories') WHERE name = 'last_recalled_at'")
+            .and_then(|mut s| s.exists([]))
+            .unwrap()
+    }
+
+    #[test]
+    fn migration_adds_the_column_once_and_leaves_rows_alone() {
+        // A `memories` table from before the column existed, with a row in it.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA_SQL).unwrap();
+        conn.execute_batch("ALTER TABLE memories DROP COLUMN last_recalled_at")
+            .unwrap();
+        conn.execute_batch(
+            "INSERT INTO spaces (id, rotation_kind, rotation_seed, created_at, memory_count)
+             VALUES ('agent:demo', 'identity', NULL, '2026-01-01T00:00:00+00:00', 1);
+             INSERT INTO memories (id, content, space_id, kind, source, tags, created_at,
+                                   content_hash, importance, belief_state, is_chunk)
+             VALUES ('m1', 'x', 'agent:demo', 'fact', 'agent', '[]',
+                     '2026-01-01T00:00:00+00:00', X'00', 0.7, 'active', 0);",
+        )
+        .unwrap();
+        assert!(
+            !has_last_recalled_at(&conn),
+            "fixture should start without the column"
+        );
+
+        SqliteStore::migrate_last_recalled_at(&conn).unwrap();
+        assert!(has_last_recalled_at(&conn));
+        // Idempotent: a second open must not fail on a duplicate column.
+        SqliteStore::migrate_last_recalled_at(&conn).unwrap();
+
+        let (importance, recalled): (f64, Option<String>) = conn
+            .query_row(
+                "SELECT importance, last_recalled_at FROM memories WHERE id = 'm1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert!(
+            (importance - 0.7).abs() < 1e-9,
+            "existing data is untouched"
+        );
+        assert!(
+            recalled.is_none(),
+            "never recalled is the truth for old rows"
+        );
+    }
+
+    #[test]
+    fn the_column_exists_on_a_freshly_opened_store() {
+        let store = SqliteStore::in_memory().unwrap();
+        assert!(has_last_recalled_at(&store.conn.lock().unwrap()));
+    }
+
+    /// The whole path a real upgrade takes: a database file written without the column
+    /// is reopened by `SqliteStore::open`, which must migrate it and leave it usable.
+    #[tokio::test]
+    async fn an_existing_database_file_is_migrated_on_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.db");
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(SCHEMA_SQL).unwrap();
+            conn.execute_batch("ALTER TABLE memories DROP COLUMN last_recalled_at")
+                .unwrap();
+            conn.execute_batch(
+                "INSERT INTO spaces (id, rotation_kind, rotation_seed, created_at, memory_count)
+                 VALUES ('agent:demo', 'identity', NULL, '2026-01-01T00:00:00+00:00', 1);
+                 INSERT INTO memories (id, content, space_id, kind, source, tags, created_at,
+                                       content_hash, importance, belief_state, is_chunk)
+                 VALUES ('11111111-1111-1111-1111-111111111111', 'kept across the upgrade',
+                         'agent:demo', 'fact', 'agent', '[]', '2026-01-01T00:00:00+00:00',
+                         X'00', 0.5, 'active', 0);",
+            )
+            .unwrap();
+        }
+
+        let store = SqliteStore::open(&path).unwrap();
+        let id = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
+        assert_eq!(
+            store.get_memory(id).await.unwrap().content,
+            "kept across the upgrade"
+        );
+        // The new column is live: the old row can be reinforced, once per interval.
+        assert_eq!(store.reinforce_recalled(&[id], 0.02, 20).await.unwrap(), 1);
+        assert_eq!(store.reinforce_recalled(&[id], 0.02, 20).await.unwrap(), 0);
+        let after = store.get_memory(id).await.unwrap().importance.unwrap();
+        assert!((after - 0.52).abs() < 1e-4, "got {after}");
+    }
+
+    /// Reinforcement is gated on the interval, not on having happened once.
+    #[tokio::test]
+    async fn reinforcement_is_allowed_again_after_the_interval() {
+        let store = SqliteStore::in_memory().unwrap();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "INSERT INTO spaces (id, rotation_kind, rotation_seed, created_at, memory_count)
+                 VALUES ('agent:demo', 'identity', NULL, '2026-01-01T00:00:00+00:00', 1);
+                 INSERT INTO memories (id, content, space_id, kind, source, tags, created_at,
+                                       content_hash, importance, belief_state, is_chunk)
+                 VALUES ('22222222-2222-2222-2222-222222222222', 'x', 'agent:demo', 'fact',
+                         'agent', '[]', '2026-01-01T00:00:00+00:00', X'00', 0.5, 'active', 0);",
+            )
+            .unwrap();
+        let id = Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap();
+
+        assert_eq!(store.reinforce_recalled(&[id], 0.02, 20).await.unwrap(), 1);
+        assert_eq!(
+            store.reinforce_recalled(&[id], 0.02, 20).await.unwrap(),
+            0,
+            "inside the interval"
+        );
+
+        let earlier = (Utc::now() - chrono::Duration::hours(21)).to_rfc3339();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE memories SET last_recalled_at = ?1",
+                params![earlier],
+            )
+            .unwrap();
+        assert_eq!(store.reinforce_recalled(&[id], 0.02, 20).await.unwrap(), 1);
     }
 }

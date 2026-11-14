@@ -85,6 +85,9 @@ pub async fn pack_context(
             spaces: input.spaces.clone(),
             content_mode: ContentMode::Parent, // Get full content for parents
             search_strategy: SearchStrategy::default(),
+            exclude_tags: Vec::new(),
+            // Packing reads memory without anyone having asked a question.
+            reinforce: false,
         };
 
         let output = crate::ops::recall::recall(

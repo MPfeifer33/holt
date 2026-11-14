@@ -54,11 +54,16 @@ pub async fn run(
     // ── Stage 1: Maintenance ──
     let maintenance_result =
         ops::maintenance::run(store, index, agent_id, config.maintenance).await;
-    let (m_decayed, m_pruned, m_tombstones) = match &maintenance_result {
-        Ok(o) => (o.memories_decayed, o.memories_pruned, o.tombstones_cleaned),
+    let (m_decayed, m_pruned, m_tombstones, m_dangling_pins) = match &maintenance_result {
+        Ok(o) => (
+            o.memories_decayed,
+            o.memories_pruned,
+            o.tombstones_cleaned,
+            o.dangling_pins_removed,
+        ),
         Err(e) => {
             tracing::error!("nightly maintenance failed: {e}");
-            (0, 0, 0)
+            (0, 0, 0, 0)
         }
     };
 
@@ -68,6 +73,7 @@ pub async fn run(
         memories_decayed: m_decayed,
         memories_pruned: m_pruned,
         tombstones_cleaned: m_tombstones,
+        dangling_pins_removed: m_dangling_pins,
         total_duration_ms,
         ran_at,
     };
@@ -77,7 +83,8 @@ pub async fn run(
     // Not on a dry run: `is_overdue` measures from the last recorded run, so a rehearsal
     // would mark maintenance as done and suppress the next real one.
     if !dry_run {
-        let summary = format!("decayed:{m_decayed} pruned:{m_pruned}");
+        let summary =
+            format!("decayed:{m_decayed} pruned:{m_pruned} dangling_pins:{m_dangling_pins}");
         let record = NightlyRunRecord {
             ran_at,
             agent_id: agent_id.to_string(),
