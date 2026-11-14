@@ -8,6 +8,96 @@ import {
   tool
 } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
+
+// sdk-bridge/core.js
+var DEFAULT_MODEL = "claude-opus-4-6";
+var MCP_SERVER_NAME = "holt";
+var MCP_TOOL_PREFIX = `mcp__${MCP_SERVER_NAME}__`;
+var QUESTION_TOOL = "AskUserQuestion";
+var RESTRICTED_NATIVE_TOOLS = [
+  "Bash",
+  "Read",
+  "Write",
+  "Edit",
+  "Glob",
+  "Grep",
+  "NotebookEdit",
+  "Agent",
+  "TaskCreate",
+  "TaskGet",
+  "TaskUpdate",
+  "TaskList",
+  "TaskStop",
+  "TodoWrite",
+  "ToolSearch",
+  "WebFetch",
+  "WebSearch",
+  "Skill",
+  "Workflow",
+  "Monitor",
+  "CronCreate",
+  "CronDelete",
+  "CronList",
+  "ScheduleWakeup",
+  "EnterPlanMode",
+  "ExitPlanMode",
+  "EnterWorktree",
+  "ExitWorktree",
+  QUESTION_TOOL
+];
+function buildQueryOptions(config2, { holtMcpServer: holtMcpServer2, canUseTool }) {
+  const opts = {
+    model: config2.model || DEFAULT_MODEL,
+    cwd: config2.cwd || void 0,
+    permissionMode: config2.permissionMode || "default",
+    settingSources: [],
+    canUseTool,
+    allowedTools: [`${MCP_TOOL_PREFIX}*`],
+    disallowedTools: config2.restrictNativeTools ? RESTRICTED_NATIVE_TOOLS : [QUESTION_TOOL],
+    includePartialMessages: true,
+    mcpServers: { [MCP_SERVER_NAME]: holtMcpServer2 }
+  };
+  if (config2.systemPrompt) {
+    opts.systemPrompt = config2.systemPrompt;
+  }
+  if (config2.sessionId) {
+    opts.resume = config2.sessionId;
+  }
+  return opts;
+}
+function isRunnerAllowedTool(toolName) {
+  return toolName.startsWith(MCP_TOOL_PREFIX);
+}
+function permissionResult(msg, input) {
+  if (msg.allow) {
+    return { behavior: "allow", updatedInput: msg.updatedInput || input };
+  }
+  return { behavior: "deny", message: msg.denyMessage || "Permission denied by user" };
+}
+function resultEvents(sdkMsg, trackedSessionId) {
+  const sessionId2 = sdkMsg.session_id || trackedSessionId || null;
+  const usage = sdkMsg.usage;
+  const events = [
+    {
+      type: "result",
+      sessionId: sessionId2,
+      costUsd: sdkMsg.total_cost_usd || null,
+      inputTokens: usage ? (usage.input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0) : null,
+      outputTokens: usage?.output_tokens ?? null
+    }
+  ];
+  const failed = sdkMsg.is_error === true || typeof sdkMsg.subtype === "string" && sdkMsg.subtype.startsWith("error");
+  if (failed) {
+    const detail = Array.isArray(sdkMsg.errors) && sdkMsg.errors.length > 0 ? `: ${sdkMsg.errors.join("; ")}` : "";
+    events.push({ type: "error", message: `Turn ended with ${sdkMsg.subtype || "an error"}${detail}`, retryable: false });
+    events.push({ type: "done", sessionId: sessionId2, error: true });
+  } else {
+    events.push({ type: "done", sessionId: sessionId2 });
+  }
+  return events;
+}
+
+// agent-sdk-bridge.js
 var config = null;
 var currentQuery = null;
 var inputQueue = null;
@@ -74,9 +164,6 @@ rl.on("line", async (line) => {
     case "permission_response":
       handlePermissionResponse(msg);
       break;
-    case "hil_response":
-      handleHilResponse(msg);
-      break;
     case "abort":
       handleAbort();
       break;
@@ -115,7 +202,7 @@ function handleToolResponse(msg) {
   pending.resolve({ content: [{ type: "text", text: resultText }] });
 }
 var holtMcpServer = createSdkMcpServer({
-  name: "holt",
+  name: MCP_SERVER_NAME,
   version: "1.0.0",
   tools: [
     tool(
@@ -301,53 +388,9 @@ var holtMcpServer = createSdkMcpServer({
     )
   ]
 });
-function buildQueryOptions() {
-  const opts = {
-    model: config.model || "claude-opus-4-6",
-    cwd: config.cwd || void 0,
-    permissionMode: config.permissionMode || "default",
-    canUseTool: handleCanUseTool,
-    allowedTools: ["mcp__holt__*"],
-    includePartialMessages: true,
-    // Phase 2: enable intermediate stream events for text streaming
-    mcpServers: {
-      holt: holtMcpServer
-    }
-  };
-  if (config.restrictNativeTools) {
-    opts.disallowedTools = [
-      "Bash",
-      "Read",
-      "Write",
-      "Edit",
-      "MultiEdit",
-      "LS",
-      "Glob",
-      "Grep",
-      "Task",
-      "ToolSearch",
-      "NotebookRead",
-      "NotebookEdit",
-      "TodoRead",
-      "TodoWrite",
-      "WebFetch",
-      "WebSearch"
-    ];
-  }
-  if (config.systemPrompt) {
-    opts.systemPrompt = config.systemPrompt;
-  }
-  if (config.sessionId) {
-    opts.resume = config.sessionId;
-  }
-  return opts;
-}
-function isRunnerAllowedTool(toolName) {
-  return toolName === "AskUserQuestion" || toolName.startsWith("mcp__holt__");
-}
 function createNewQuery() {
   inputQueue = new AsyncQueue();
-  const options = buildQueryOptions();
+  const options = buildQueryOptions(config, { holtMcpServer, canUseTool: handleCanUseTool });
   currentQuery = query({
     prompt: inputQueue,
     options
@@ -417,7 +460,10 @@ async function handleCanUseTool(toolName, input, options) {
       message: `Tool ${toolName} is not allowed in restricted runner mode`
     };
   }
-  if (config && config.autonomous && toolName !== "AskUserQuestion") {
+  if (toolName === "AskUserQuestion") {
+    return { behavior: "deny", message: "There is no question card in this lane. Ask the user in your reply instead." };
+  }
+  if (config && config.autonomous) {
     return { behavior: "allow", updatedInput: input };
   }
   const requestId = `perm-${nextRequestId++}`;
@@ -429,6 +475,7 @@ async function handleCanUseTool(toolName, input, options) {
       }
     }, 5 * 60 * 1e3);
     pendingPermissions.set(requestId, {
+      input,
       resolve: (val) => {
         clearTimeout(timeoutId);
         resolve(val);
@@ -445,45 +492,21 @@ async function handleCanUseTool(toolName, input, options) {
         reject(new Error("Permission request aborted"));
       });
     }
-    if (toolName === "AskUserQuestion") {
-      emit({
-        type: "hil_question",
-        questions: input,
-        requestId
-      });
-    } else {
-      emit({
-        type: "permission_request",
-        tool: toolName,
-        input,
-        requestId,
-        title: options?.title || void 0,
-        displayName: options?.displayName || void 0
-      });
-    }
+    emit({
+      type: "permission_request",
+      tool: toolName,
+      input,
+      requestId,
+      title: options?.title || void 0,
+      displayName: options?.displayName || void 0
+    });
   });
 }
 function handlePermissionResponse(msg) {
   const pending = pendingPermissions.get(msg.requestId);
   if (!pending) return;
   pendingPermissions.delete(msg.requestId);
-  if (msg.allow) {
-    pending.resolve({
-      behavior: "allow",
-      updatedInput: msg.updatedInput || void 0
-    });
-  } else {
-    pending.resolve({
-      behavior: "deny",
-      message: msg.denyMessage || "Permission denied by user"
-    });
-  }
-}
-function handleHilResponse(msg) {
-  const pending = pendingPermissions.get(msg.requestId);
-  if (!pending) return;
-  pendingPermissions.delete(msg.requestId);
-  pending.resolve({ behavior: "allow", answers: msg.answers });
+  pending.resolve(permissionResult(msg, pending.input));
 }
 function handleAbort() {
   if (currentQuery && currentQuery.interrupt) {
@@ -590,14 +613,9 @@ function handleStreamMessage(sdkMsg) {
       }
       break;
     case "result":
-      emit({
-        type: "result",
-        sessionId: sdkMsg.session_id || sessionId || null,
-        costUsd: sdkMsg.total_cost_usd || null,
-        inputTokens: sdkMsg.usage ? (sdkMsg.usage.input_tokens ?? 0) + (sdkMsg.usage.cache_read_input_tokens ?? 0) + (sdkMsg.usage.cache_creation_input_tokens ?? 0) : null,
-        outputTokens: sdkMsg.usage?.output_tokens ?? null
-      });
-      emit({ type: "done", sessionId: sdkMsg.session_id || sessionId || null });
+      for (const ev of resultEvents(sdkMsg, sessionId)) {
+        emit(ev);
+      }
       break;
     case "tool_use_summary":
       emit({
@@ -606,12 +624,6 @@ function handleStreamMessage(sdkMsg) {
         output: sdkMsg.summary || "",
         toolUseId: null
       });
-      break;
-    case "session_state_changed":
-      if (sdkMsg.session_id) {
-        sessionId = sdkMsg.session_id;
-        emit({ type: "session", sessionId: sdkMsg.session_id });
-      }
       break;
     default:
       break;

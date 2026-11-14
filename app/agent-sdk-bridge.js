@@ -10,6 +10,7 @@
  * - MCP tools via createSdkMcpServer (Holt intelligence tools)
  * - Bidirectional permission flow via canUseTool callback
  * - Session resume on app restart
+ * - No filesystem settings: agents run on what Holt gives them
  */
 
 import { createInterface } from 'readline';
@@ -19,6 +20,7 @@ import {
     tool,
 } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
+import { buildQueryOptions, isRunnerAllowedTool, permissionResult, resultEvents, MCP_SERVER_NAME } from './sdk-bridge/core.js';
 
 // ── State ──────────────────────────────────────────────────────────────
 
@@ -104,9 +106,6 @@ rl.on('line', async (line) => {
         case 'permission_response':
             handlePermissionResponse(msg);
             break;
-        case 'hil_response':
-            handleHilResponse(msg);
-            break;
         case 'abort':
             handleAbort();
             break;
@@ -158,7 +157,7 @@ function handleToolResponse(msg) {
 
 // Holt intelligence tools with Zod schemas (required by createSdkMcpServer).
 const holtMcpServer = createSdkMcpServer({
-    name: 'holt',
+    name: MCP_SERVER_NAME,
     version: '1.0.0',
     tools: [
         tool('remember', 'Store a fact, decision, preference, or pattern in long-term memory so it survives across sessions. Use this for architectural choices, recurring gotchas, user preferences, or project context worth carrying forward. Do not use this for turn-local details or information that only matters right now.',
@@ -294,63 +293,9 @@ const holtMcpServer = createSdkMcpServer({
 
 // ── Query creation ────────────────────────────────────────────────────
 
-function buildQueryOptions() {
-    const opts = {
-        model: config.model || 'claude-opus-4-6',
-        cwd: config.cwd || undefined,
-        permissionMode: config.permissionMode || 'default',
-        canUseTool: handleCanUseTool,
-        allowedTools: ['mcp__holt__*'],
-        includePartialMessages: true,  // Phase 2: enable intermediate stream events for text streaming
-        mcpServers: {
-            holt: holtMcpServer,
-        },
-    };
-
-    if (config.restrictNativeTools) {
-        // Runner mode should compare Holt's tool surface, not Claude Code's
-        // native file/shell helpers. Remove them from model context up front.
-        opts.disallowedTools = [
-            'Bash',
-            'Read',
-            'Write',
-            'Edit',
-            'MultiEdit',
-            'LS',
-            'Glob',
-            'Grep',
-            'Task',
-            'ToolSearch',
-            'NotebookRead',
-            'NotebookEdit',
-            'TodoRead',
-            'TodoWrite',
-            'WebFetch',
-            'WebSearch',
-        ];
-    }
-
-    // System prompt for persona identity
-    if (config.systemPrompt) {
-        opts.systemPrompt = config.systemPrompt;
-    }
-
-    // Resume existing session
-    if (config.sessionId) {
-        opts.resume = config.sessionId;
-    }
-
-    return opts;
-}
-
-function isRunnerAllowedTool(toolName) {
-    return toolName === 'AskUserQuestion'
-        || toolName.startsWith('mcp__holt__');
-}
-
 function createNewQuery() {
     inputQueue = new AsyncQueue();
-    const options = buildQueryOptions();
+    const options = buildQueryOptions(config, { holtMcpServer, canUseTool: handleCanUseTool });
 
     currentQuery = query({
         prompt: inputQueue,
@@ -453,8 +398,14 @@ async function handleCanUseTool(toolName, input, options) {
         };
     }
 
-    // Autonomous agents auto-approve everything (except AskUserQuestion)
-    if (config && config.autonomous && toolName !== 'AskUserQuestion') {
+    // The question widget is disallowed up front; if a call still arrives,
+    // answer at once rather than leave it waiting on a card that never comes.
+    if (toolName === 'AskUserQuestion') {
+        return { behavior: 'deny', message: 'There is no question card in this lane. Ask the user in your reply instead.' };
+    }
+
+    // Autonomous agents auto-approve everything else.
+    if (config && config.autonomous) {
         return { behavior: 'allow', updatedInput: input };
     }
 
@@ -470,6 +421,7 @@ async function handleCanUseTool(toolName, input, options) {
         }, 5 * 60 * 1000);
 
         pendingPermissions.set(requestId, {
+            input,
             resolve: (val) => { clearTimeout(timeoutId); resolve(val); },
             reject: (err) => { clearTimeout(timeoutId); reject(err); },
         });
@@ -482,23 +434,15 @@ async function handleCanUseTool(toolName, input, options) {
             });
         }
 
-        // AskUserQuestion needs different routing in Rust (PromptModal vs approval toast)
-        if (toolName === 'AskUserQuestion') {
-            emit({
-                type: 'hil_question',
-                questions: input,
-                requestId: requestId,
-            });
-        } else {
-            emit({
-                type: 'permission_request',
-                tool: toolName,
-                input: input,
-                requestId: requestId,
-                title: options?.title || undefined,
-                displayName: options?.displayName || undefined,
-            });
-        }
+        // Rust raises the approval card and answers with permission_response.
+        emit({
+            type: 'permission_request',
+            tool: toolName,
+            input: input,
+            requestId: requestId,
+            title: options?.title || undefined,
+            displayName: options?.displayName || undefined,
+        });
     });
 }
 
@@ -506,25 +450,7 @@ function handlePermissionResponse(msg) {
     const pending = pendingPermissions.get(msg.requestId);
     if (!pending) return;
     pendingPermissions.delete(msg.requestId);
-
-    if (msg.allow) {
-        pending.resolve({
-            behavior: 'allow',
-            updatedInput: msg.updatedInput || undefined,
-        });
-    } else {
-        pending.resolve({
-            behavior: 'deny',
-            message: msg.denyMessage || 'Permission denied by user',
-        });
-    }
-}
-
-function handleHilResponse(msg) {
-    const pending = pendingPermissions.get(msg.requestId);
-    if (!pending) return;
-    pendingPermissions.delete(msg.requestId);
-    pending.resolve({ behavior: 'allow', answers: msg.answers });
+    pending.resolve(permissionResult(msg, pending.input));
 }
 
 // ── Abort ──────────────────────────────────────────────────────────────
@@ -682,19 +608,10 @@ function handleStreamMessage(sdkMsg) {
             break;
 
         case 'result':
-            emit({
-                type: 'result',
-                sessionId: sdkMsg.session_id || sessionId || null,
-                costUsd: sdkMsg.total_cost_usd || null,
-                inputTokens: sdkMsg.usage
-                    ? (sdkMsg.usage.input_tokens ?? 0)
-                      + (sdkMsg.usage.cache_read_input_tokens ?? 0)
-                      + (sdkMsg.usage.cache_creation_input_tokens ?? 0)
-                    : null,
-                outputTokens: sdkMsg.usage?.output_tokens ?? null,
-            });
-            // Signal turn complete — Rust side expects this
-            emit({ type: 'done', sessionId: sdkMsg.session_id || sessionId || null });
+            // Includes the turn-complete `done` the Rust side waits for.
+            for (const ev of resultEvents(sdkMsg, sessionId)) {
+                emit(ev);
+            }
             break;
 
         case 'tool_use_summary':
@@ -704,13 +621,6 @@ function handleStreamMessage(sdkMsg) {
                 output: sdkMsg.summary || '',
                 toolUseId: null,
             });
-            break;
-
-        case 'session_state_changed':
-            if (sdkMsg.session_id) {
-                sessionId = sdkMsg.session_id;
-                emit({ type: 'session', sessionId: sdkMsg.session_id });
-            }
             break;
 
         default:
