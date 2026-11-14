@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 /// MCP server name used by the Agent SDK bridge. Referenced in bridge JS
 /// and agent config allowed_tools patterns. If this changes, update
-/// agent-sdk-bridge.js to match and rebuild the sidecar bundle.
+/// sdk-bridge/core.js to match and rebuild the sidecar bundle.
 pub const MCP_SERVER_NAME: &str = "holt";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

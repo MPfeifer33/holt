@@ -2086,7 +2086,7 @@ mod tests {
 
         let mut agent = test_agent_slot();
         agent.anthropic_settings = Some(AnthropicSettings {
-            model: "claude-opus-4-5".to_string(),
+            model: "claude-opus-5".to_string(),
             thinking_enabled: true,
             thinking_budget: 16384,
             temperature: 1.0,
@@ -2094,16 +2094,16 @@ mod tests {
 
         let global = AgentSdkBlock::default();
         let resolved = resolve_sdk_model(&agent, &global);
-        assert_eq!(resolved, "claude-opus-4-5");
+        assert_eq!(resolved, "claude-opus-5");
     }
 
     #[test]
     fn test_resolve_sdk_model_falls_back_to_global() {
         let agent = test_agent_slot();
         let mut global = AgentSdkBlock::default();
-        global.model = "claude-sonnet-4-6-20250725".to_string();
+        global.model = "claude-sonnet-5-5".to_string();
         let resolved = resolve_sdk_model(&agent, &global);
-        assert_eq!(resolved, "claude-sonnet-4-6-20250725");
+        assert_eq!(resolved, "claude-sonnet-5-5");
     }
 
     /// Build a minimal AgentSlot for testing.

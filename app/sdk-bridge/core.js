@@ -5,7 +5,7 @@
  */
 
 /** Matches the default in `config/agent_sdk_config.rs`; Rust normally sends the model. */
-export const DEFAULT_MODEL = 'claude-opus-4-6';
+export const DEFAULT_MODEL = 'claude-opus-5-5';
 
 /** Name of the in-process MCP server that carries Holt's tools. */
 export const MCP_SERVER_NAME = 'holt';

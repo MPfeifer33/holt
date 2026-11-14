@@ -10,7 +10,7 @@ import {
 import { z } from "zod";
 
 // sdk-bridge/core.js
-var DEFAULT_MODEL = "claude-opus-4-6";
+var DEFAULT_MODEL = "claude-opus-5-5";
 var MCP_SERVER_NAME = "holt";
 var MCP_TOOL_PREFIX = `mcp__${MCP_SERVER_NAME}__`;
 var QUESTION_TOOL = "AskUserQuestion";
