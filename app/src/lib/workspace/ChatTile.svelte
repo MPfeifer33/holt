@@ -1390,9 +1390,13 @@
         }}
       >
         {#if isAnthropicAgent}
-          <option value="opus4.5">Opus 4.5</option>
+          <option value="opus">Opus 5.5</option>
+          <option value="opus5">Opus 5</option>
+          <option value="sonnet">Sonnet 5.5</option>
+          <option value="sonnet5">Sonnet 5</option>
+          <option value="haiku">Haiku 5.5</option>
+          <option value="fable">Fable 5.1</option>
           <option value="opus4.6">Opus 4.6</option>
-          <option value="sonnet4.5">Sonnet 4.5</option>
           <option value="sonnet4.6">Sonnet 4.6</option>
         {:else}
           <option value={currentModel}>{currentModel || 'default'}</option>

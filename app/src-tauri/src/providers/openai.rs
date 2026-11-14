@@ -435,6 +435,7 @@ impl CompletionProvider for OpenAIProvider {
             } else {
                 Some(thinking_content)
             },
+            reasoning_items: None,
         })
     }
 }

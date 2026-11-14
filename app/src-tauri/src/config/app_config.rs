@@ -1111,6 +1111,9 @@ theme = "dark"
 "#;
         let config: AppConfig = toml::from_str(toml_str).unwrap();
         assert!(config.agent_sdk.enabled);
-        assert_eq!(config.agent_sdk.model, "claude-opus-4-6");
+        assert_eq!(
+            config.agent_sdk.model,
+            crate::runtime::context::model_sizes::DEFAULT_CLAUDE_MODEL
+        );
     }
 }

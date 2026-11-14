@@ -21,7 +21,7 @@ impl Default for AgentSdkBlock {
         Self {
             enabled: true,
             node_path: "node".to_string(),
-            model: "claude-opus-4-6".to_string(),
+            model: crate::runtime::context::model_sizes::DEFAULT_CLAUDE_MODEL.to_string(),
         }
     }
 }
@@ -35,12 +35,15 @@ mod tests {
         let block = AgentSdkBlock {
             enabled: true,
             node_path: "node".to_string(),
-            model: "claude-opus-4-6".to_string(),
+            model: crate::runtime::context::model_sizes::DEFAULT_CLAUDE_MODEL.to_string(),
         };
         let toml_str = toml::to_string(&block).expect("serialize");
         let decoded: AgentSdkBlock = toml::from_str(&toml_str).expect("deserialize");
         assert_eq!(decoded.enabled, true);
-        assert_eq!(decoded.model, "claude-opus-4-6");
+        assert_eq!(
+            decoded.model,
+            crate::runtime::context::model_sizes::DEFAULT_CLAUDE_MODEL
+        );
     }
 
     #[test]
@@ -49,7 +52,10 @@ mod tests {
         let block: AgentSdkBlock = toml::from_str(toml_str).expect("deserialize empty");
         assert_eq!(block.enabled, true);
         assert_eq!(block.node_path, "node");
-        assert_eq!(block.model, "claude-opus-4-6");
+        assert_eq!(
+            block.model,
+            crate::runtime::context::model_sizes::DEFAULT_CLAUDE_MODEL
+        );
     }
 
     #[test]

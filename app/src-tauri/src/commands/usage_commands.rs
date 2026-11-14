@@ -41,7 +41,9 @@ fn extract_model_name(connection: &ConnectionConfig) -> String {
         ConnectionConfig::Local { model, .. } => model.clone().unwrap_or_default(),
         ConnectionConfig::McpStdio { .. } => String::new(),
         ConnectionConfig::OAuth { model, .. } => model.clone(),
-        ConnectionConfig::AgentSdk => "claude-opus-4-6".to_string(),
+        ConnectionConfig::AgentSdk => {
+            crate::runtime::context::model_sizes::DEFAULT_CLAUDE_MODEL.to_string()
+        }
     }
 }
 

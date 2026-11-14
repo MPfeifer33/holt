@@ -152,21 +152,23 @@ impl XAISettings {
 
 /// Check if a model name corresponds to an always-reasoning Grok model.
 pub fn is_always_reasoning_model(model: &str) -> bool {
-    // grok-4.3 and grok-4 (exact, not grok-4-fast or grok-4.1-fast) use
-    // always-on reasoning. The "fast" variants do NOT.
-    model == "grok-4.3" || model == "grok-4"
+    // Every Grok 4 from 4.3 on reasons unconditionally, as does bare
+    // grok-4. The retired "fast" variants did not.
+    if model.contains("fast") || model.contains("multi-agent") {
+        return false;
+    }
+    model == "grok-4"
+        || model
+            .strip_prefix("grok-4.")
+            .and_then(|v| v.split('-').next())
+            .and_then(|v| v.parse::<u32>().ok())
+            .is_some_and(|minor| minor >= 3)
 }
 
-/// Get the context window size for a given Grok model.
+/// Get the context window size for a given Grok model. The model size
+/// table is the one place sizes are written down; this only asks it.
 fn context_window_for_model(model: &str) -> u32 {
-    match model {
-        "grok-4.3" => 1_048_576,                       // 1M
-        "grok-4" => 131_072,                           // 128K
-        "grok-4-fast" => 131_072,                      // 128K
-        "grok-4.1-fast" => 2_097_152,                  // 2M
-        _ if model.contains("multi-agent") => 131_072, // 128K default
-        _ => 131_072,                                  // Conservative default
-    }
+    crate::runtime::context::model_sizes::grok_context_size(model)
 }
 
 impl Default for XAISettings {
@@ -223,6 +225,11 @@ mod tests {
 
         s.model = "grok-4.1-fast".into();
         assert!(!s.is_always_reasoning());
+
+        for current in ["grok-4.5", "grok-4.6", "grok-4.7"] {
+            s.model = current.into();
+            assert!(s.is_always_reasoning(), "{current}");
+        }
     }
 
     #[test]
@@ -240,13 +247,13 @@ mod tests {
     fn test_context_window() {
         let mut s = XAISettings::default();
         s.model = "grok-4.3".into();
-        assert_eq!(s.context_window(), 1_048_576);
+        assert_eq!(s.context_window(), 1_000_000);
 
-        s.model = "grok-4.1-fast".into();
-        assert_eq!(s.context_window(), 2_097_152);
+        s.model = "grok-4.7".into();
+        assert_eq!(s.context_window(), 500_000);
 
         s.model = "grok-4".into();
-        assert_eq!(s.context_window(), 131_072);
+        assert_eq!(s.context_window(), 256_000);
     }
 
     #[test]

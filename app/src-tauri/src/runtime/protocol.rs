@@ -164,7 +164,7 @@ mod tests {
         let connection = ConnectionConfig::OAuth {
             provider: "anthropic".to_string(),
             credentials_path: std::path::PathBuf::from("/tmp/credentials.json"),
-            model: "claude-opus-4-6".to_string(),
+            model: crate::runtime::context::model_sizes::DEFAULT_CLAUDE_MODEL.to_string(),
         };
 
         assert_eq!(

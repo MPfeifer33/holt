@@ -48,6 +48,10 @@ pub struct AssembledResponse {
     pub usage: Option<UsageInfo>,
     pub finish_reason: Option<String>,
     pub thinking_content: Option<String>,
+    /// Provider-opaque reasoning state to store on the assistant message and
+    /// hand back on later turns (for Anthropic: the thinking blocks with
+    /// their signatures). `None` when the provider keeps none.
+    pub reasoning_items: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

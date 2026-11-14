@@ -510,6 +510,7 @@ impl CompletionProvider for GeminiProvider {
             usage,
             finish_reason,
             thinking_content: None,
+            reasoning_items: None,
         })
     }
 }

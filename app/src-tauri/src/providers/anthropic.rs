@@ -1,10 +1,15 @@
 // providers/anthropic.rs — Anthropic Messages API provider (OAuth path).
 //
-// PRESERVATION CONTRACT: This file is a byte-for-byte move of runtime/anthropic.rs
-// wrapped in the CompletionProvider trait. The OAuth headers, Claude Code identity
-// headers, message conversion, tool conversion, and SSE parsing logic are IDENTICAL
-// to the working runtime/anthropic.rs. Do not modify without running all 4 tests
-// AND a manual smoke test.
+// The OAuth headers, Claude Code identity headers, tool conversion and cache
+// block layout are unchanged from the original runtime/anthropic.rs.
+//
+// Request and stream shape were brought up to the current Messages API in
+// November 2026: models from 4.6 on think adaptively (`thinking.type =
+// "adaptive"`, depth via `output_config.effort`) and reject a manual
+// `budget_tokens`; 4.5 and earlier keep the manual budget. Thinking blocks
+// are kept apart with their signatures and replayed exactly as received.
+// These changes are covered by the unit tests below; they have not been
+// exercised against the live API from this repository.
 
 use futures::StreamExt;
 
@@ -29,6 +34,129 @@ const CLAUDE_CODE_BETA: &str = "claude-code-20250219";
 /// Claude Code identity headers required by Anthropic API for OAuth access.
 const CLAUDE_CLI_USER_AGENT: &str = "claude-cli/2.1.81";
 const CLAUDE_CODE_SYSTEM_PREFIX: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
+
+/// Interleaved thinking is automatic under adaptive thinking; only the
+/// manual-budget models still need the header.
+const INTERLEAVED_THINKING_BETA: &str = "interleaved-thinking-2025-05-14";
+
+/// `max_tokens` covers thinking as well as the reply, so an adaptive
+/// thinking request never goes out with less than this.
+const THINKING_MAX_TOKENS_FLOOR: u32 = 20_480;
+
+/// Upper bound for an adaptive thinking request. Every adaptive model
+/// accepts at least this much output.
+const ADAPTIVE_MAX_TOKENS_CEILING: u32 = 64_000;
+
+/// Key under which this provider stores the thinking blocks of a reply in
+/// `reasoning_items`, exactly as received, so they can be replayed.
+pub(crate) const THINKING_BLOCKS_KEY: &str = "anthropic_blocks";
+
+// =============================================================================
+// Thinking: which request shape a model takes
+// =============================================================================
+
+/// Claude 4.5 and earlier take a manual thinking budget; everything from
+/// 4.6 on is adaptive. An id this does not recognise is assumed current.
+pub(crate) fn takes_thinking_budget(model: &str) -> bool {
+    let l = model.to_ascii_lowercase();
+    l.contains("claude-3")
+        || ["-4-5", "-4-1", "-4-0", "-4-2025"]
+            .iter()
+            .any(|m| l.contains(m))
+}
+
+/// The thinking-related parts of a request, decided from the model id and
+/// the agent's thinking settings.
+#[derive(Debug, PartialEq)]
+pub(crate) struct ThinkingRequest {
+    pub max_tokens: u32,
+    /// The `thinking` field, when one is sent.
+    pub thinking: Option<serde_json::Value>,
+    /// The `output_config` field, when one is sent.
+    pub output_config: Option<serde_json::Value>,
+    /// Whether the interleaved-thinking beta header is needed.
+    pub interleaved_beta: bool,
+}
+
+pub(crate) fn thinking_request(
+    model: &str,
+    thinking_enabled: bool,
+    thinking_budget: u32,
+    max_tokens: u32,
+) -> ThinkingRequest {
+    if takes_thinking_budget(model) {
+        // Manual budget: `budget_tokens` is a sub-allocation of `max_tokens`.
+        if thinking_enabled {
+            ThinkingRequest {
+                max_tokens: max_tokens.max(thinking_budget + 4096).min(32_000),
+                thinking: Some(serde_json::json!({
+                    "type": "enabled",
+                    "budget_tokens": thinking_budget,
+                })),
+                output_config: None,
+                interleaved_beta: true,
+            }
+        } else {
+            ThinkingRequest {
+                max_tokens: max_tokens.min(16_384),
+                thinking: None,
+                output_config: None,
+                interleaved_beta: false,
+            }
+        }
+    } else if thinking_enabled {
+        // Adaptive: the model decides how much to think. `display` asks for
+        // summarized thinking text; the default on current models is none.
+        ThinkingRequest {
+            max_tokens: max_tokens
+                .max(THINKING_MAX_TOKENS_FLOOR)
+                .min(ADAPTIVE_MAX_TOKENS_CEILING),
+            thinking: Some(serde_json::json!({"type": "adaptive", "display": "summarized"})),
+            output_config: None,
+            interleaved_beta: false,
+        }
+    } else {
+        // Thinking cannot be switched off on the 5 family, so "off" means:
+        // say nothing about thinking and ask for low effort.
+        ThinkingRequest {
+            max_tokens: max_tokens.min(16_384),
+            thinking: None,
+            output_config: Some(serde_json::json!({"effort": "low"})),
+            interleaved_beta: false,
+        }
+    }
+}
+
+/// The thinking blocks of a stored assistant message that may be sent back:
+/// only blocks this provider received and stored itself. Thinking text
+/// without a signature (older conversations, other providers) is never
+/// replayed, because the API rejects an unsigned thinking block.
+fn replayable_thinking(msg: &serde_json::Value) -> Vec<serde_json::Value> {
+    msg.get("reasoning_items")
+        .and_then(|r| r.get(THINKING_BLOCKS_KEY))
+        .and_then(|b| b.as_array())
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Splits a byte stream into lines without decoding a character that is
+/// still arriving: bytes are held until their line is complete.
+#[derive(Default)]
+struct LineBuffer {
+    bytes: Vec<u8>,
+}
+
+impl LineBuffer {
+    fn push(&mut self, chunk: &[u8]) -> Vec<String> {
+        self.bytes.extend_from_slice(chunk);
+        let mut lines = Vec::new();
+        while let Some(nl) = self.bytes.iter().position(|b| *b == b'\n') {
+            let line: Vec<u8> = self.bytes.drain(..=nl).collect();
+            lines.push(String::from_utf8_lossy(&line[..nl]).trim().to_string());
+        }
+        lines
+    }
+}
 
 // =============================================================================
 // Message/tool conversion helpers — identical to runtime/anthropic.rs
@@ -110,20 +238,11 @@ pub fn convert_messages_to_anthropic(
             }
             "assistant" => {
                 let content = msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
-                let thinking = msg.get("thinking_content").and_then(|t| t.as_str());
                 let tool_calls = msg.get("tool_calls").and_then(|tc| tc.as_array());
 
-                let mut blocks: Vec<serde_json::Value> = Vec::new();
-
-                // Preserve thinking blocks (required for multi-turn thinking)
-                if let Some(thinking_text) = thinking {
-                    if !thinking_text.is_empty() {
-                        blocks.push(serde_json::json!({
-                            "type": "thinking",
-                            "thinking": thinking_text,
-                        }));
-                    }
-                }
+                // Thinking blocks go back one for one, each with its own
+                // signature, including empty signed and redacted blocks.
+                let mut blocks: Vec<serde_json::Value> = replayable_thinking(msg);
 
                 if !content.is_empty() {
                     blocks.push(serde_json::json!({
@@ -358,14 +477,15 @@ impl CompletionProvider for AnthropicProvider {
         let (system_prompt, mut anthropic_messages) = convert_messages_to_anthropic(messages);
         let mut anthropic_tools = tools.map(convert_tools_to_anthropic);
 
-        // Anthropic: max_tokens covers ALL output (thinking + response combined).
-        // With thinking enabled, budget_tokens is a sub-allocation within max_tokens.
-        // Cap at 16384 without thinking, 32000 with thinking.
-        let effective_max_tokens = if self.thinking_enabled {
-            max_tokens.max(self.thinking_budget + 4096).min(32000)
-        } else {
-            max_tokens.min(16384)
-        };
+        // max_tokens covers ALL output (thinking + response combined). The
+        // shape of the thinking request depends on the model generation.
+        let thinking_req = thinking_request(
+            &self.model,
+            self.thinking_enabled,
+            self.thinking_budget,
+            max_tokens,
+        );
+        let effective_max_tokens = thinking_req.max_tokens;
 
         // OAuth requires system prompt to be EXACTLY the Claude Code prefix.
         // Any custom system/persona content must go as a prefixed user message.
@@ -472,21 +592,18 @@ impl CompletionProvider for AnthropicProvider {
             }
         }
 
-        if self.thinking_enabled {
-            body["thinking"] = serde_json::json!({
-                "type": "enabled",
-                "budget_tokens": self.thinking_budget,
-            });
+        if let Some(thinking) = &thinking_req.thinking {
+            body["thinking"] = thinking.clone();
+        }
+        if let Some(output_config) = &thinking_req.output_config {
+            body["output_config"] = output_config.clone();
         }
 
-        // Build beta header: OAuth + Claude Code identity + optional thinking
-        let mut betas = vec![
-            CLAUDE_CODE_BETA.to_string(),
-            OAUTH_BETA.to_string(),
-            "prompt-caching-2024-07-31".to_string(),
-        ];
-        if self.thinking_enabled {
-            betas.push("interleaved-thinking-2025-05-14".to_string());
+        // Build beta header: OAuth + Claude Code identity. Prompt caching and
+        // adaptive interleaved thinking are generally available and need none.
+        let mut betas = vec![CLAUDE_CODE_BETA.to_string(), OAUTH_BETA.to_string()];
+        if thinking_req.interleaved_beta {
+            betas.push(INTERLEAVED_THINKING_BETA.to_string());
         }
         let anthropic_beta = betas.join(",");
 
@@ -550,174 +667,17 @@ impl CompletionProvider for AnthropicProvider {
 
         // Parse SSE stream
         let mut stream = resp.bytes_stream();
-        let mut buffer = String::new();
-        let mut text_content = String::new();
-        let mut thinking_content = String::new();
-        let mut tool_calls: Vec<ToolCallRecord> = Vec::new();
-        let mut usage_info: Option<UsageInfo> = None;
-        let mut finish_reason: Option<String> = None;
-
-        // Track current content block for accumulation
-        let mut current_block_type: Option<String> = None;
-        let mut current_tool_id = String::new();
-        let mut current_tool_name = String::new();
-        let mut current_tool_input = String::new();
+        let mut lines = LineBuffer::default();
+        let mut assembler = StreamAssembler::default();
 
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|e| StreamError::ApiError(e.to_string()))?;
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
-
-            // Process complete SSE lines
-            while let Some(line_end) = buffer.find('\n') {
-                let line = buffer[..line_end].trim().to_string();
-                buffer = buffer[line_end + 1..].to_string();
-
-                if line.is_empty() || line.starts_with(':') {
-                    continue;
-                }
-
-                if let Some(data) = line.strip_prefix("data: ") {
-                    if data == "[DONE]" {
-                        continue;
-                    }
-
-                    let event: serde_json::Value = match serde_json::from_str(data) {
-                        Ok(v) => v,
-                        Err(_) => continue,
-                    };
-
-                    let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
-
-                    match event_type {
-                        "content_block_start" => {
-                            if let Some(block) = event.get("content_block") {
-                                let block_type =
-                                    block.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                                current_block_type = Some(block_type.to_string());
-
-                                if block_type == "tool_use" {
-                                    current_tool_id = block
-                                        .get("id")
-                                        .and_then(|i| i.as_str())
-                                        .unwrap_or("")
-                                        .to_string();
-                                    current_tool_name = block
-                                        .get("name")
-                                        .and_then(|n| n.as_str())
-                                        .unwrap_or("")
-                                        .to_string();
-                                    current_tool_input.clear();
-                                }
-                            }
-                        }
-                        "content_block_delta" => {
-                            if let Some(delta) = event.get("delta") {
-                                let delta_type =
-                                    delta.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                                match delta_type {
-                                    "text_delta" => {
-                                        if let Some(text) =
-                                            delta.get("text").and_then(|t| t.as_str())
-                                        {
-                                            text_content.push_str(text);
-                                            on_token(StreamEvent {
-                                                agent_id: agent_id.to_string(),
-                                                event_type: StreamEventType::Token,
-                                                data: serde_json::json!({"text": text}),
-                                            });
-                                        }
-                                    }
-                                    "thinking_delta" => {
-                                        if let Some(thinking) =
-                                            delta.get("thinking").and_then(|t| t.as_str())
-                                        {
-                                            thinking_content.push_str(thinking);
-                                            on_token(StreamEvent {
-                                                agent_id: agent_id.to_string(),
-                                                event_type: StreamEventType::Thinking,
-                                                data: serde_json::json!({"text": thinking}),
-                                            });
-                                        }
-                                    }
-                                    "input_json_delta" => {
-                                        if let Some(partial) =
-                                            delta.get("partial_json").and_then(|p| p.as_str())
-                                        {
-                                            current_tool_input.push_str(partial);
-                                        }
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                        "content_block_stop" => {
-                            if current_block_type.as_deref() == Some("tool_use") {
-                                let arguments: serde_json::Value =
-                                    serde_json::from_str(&current_tool_input)
-                                        .unwrap_or(serde_json::json!({}));
-                                tool_calls.push(ToolCallRecord {
-                                    id: current_tool_id.clone(),
-                                    name: current_tool_name.clone(),
-                                    arguments,
-                                });
-                            }
-                            current_block_type = None;
-                        }
-                        "message_delta" => {
-                            if let Some(delta) = event.get("delta") {
-                                finish_reason = delta
-                                    .get("stop_reason")
-                                    .and_then(|s| s.as_str())
-                                    .map(|s| s.to_string());
-                            }
-                            if let Some(usage) = event.get("usage") {
-                                usage_info = Some(UsageInfo {
-                                    prompt_tokens: usage
-                                        .get("input_tokens")
-                                        .and_then(|t| t.as_u64())
-                                        .map(|t| t as u32),
-                                    completion_tokens: usage
-                                        .get("output_tokens")
-                                        .and_then(|t| t.as_u64())
-                                        .map(|t| t as u32),
-                                    total_tokens: None,
-                                });
-                            }
-                        }
-                        "message_start" => {
-                            if let Some(message) = event.get("message") {
-                                if let Some(usage) = message.get("usage") {
-                                    let input = usage
-                                        .get("input_tokens")
-                                        .and_then(|t| t.as_u64())
-                                        .map(|t| t as u32);
-                                    if usage_info.is_none() {
-                                        usage_info = Some(UsageInfo {
-                                            prompt_tokens: input,
-                                            completion_tokens: None,
-                                            total_tokens: None,
-                                        });
-                                    }
-                                }
-                            }
-                        }
-                        "message_stop" | "ping" => {}
-                        "error" => {
-                            let error_msg = event
-                                .get("error")
-                                .and_then(|e| e.get("message"))
-                                .and_then(|m| m.as_str())
-                                .unwrap_or("Unknown Anthropic API error");
-                            return Err(StreamError::ApiError(format!(
-                                "Anthropic error: {}",
-                                error_msg
-                            )));
-                        }
-                        _ => {}
-                    }
-                }
+            for line in lines.push(&chunk) {
+                assembler.push_line(&line, on_token, agent_id)?;
             }
         }
+
+        let response = assembler.finish()?;
 
         // Emit Done event (required by frontend to finalize message display)
         on_token(StreamEvent {
@@ -726,22 +686,234 @@ impl CompletionProvider for AnthropicProvider {
             data: serde_json::json!({}),
         });
 
+        Ok(response)
+    }
+}
+
+// =============================================================================
+// Stream assembly
+// =============================================================================
+
+/// One content block as it arrives.
+#[derive(Default)]
+struct Block {
+    kind: String,
+    text: String,
+    signature: String,
+    /// `redacted_thinking` payload.
+    data: String,
+    tool_id: String,
+    tool_name: String,
+    tool_input: String,
+}
+
+/// Turns the SSE lines of one reply into an `AssembledResponse`.
+#[derive(Default)]
+struct StreamAssembler {
+    current: Option<Block>,
+    text_content: String,
+    thinking_content: String,
+    /// Thinking blocks exactly as received, for replay.
+    thinking_blocks: Vec<serde_json::Value>,
+    tool_calls: Vec<ToolCallRecord>,
+    usage: Option<UsageInfo>,
+    stop_reason: Option<String>,
+    /// `stop_details.category` when the stop was a refusal.
+    refusal_category: Option<String>,
+}
+
+impl StreamAssembler {
+    fn push_line(
+        &mut self,
+        line: &str,
+        on_token: &(dyn Fn(StreamEvent) + Send + Sync),
+        agent_id: &str,
+    ) -> Result<(), StreamError> {
+        if line.is_empty() || line.starts_with(':') {
+            return Ok(());
+        }
+        let Some(data) = line.strip_prefix("data:").map(str::trim_start) else {
+            return Ok(());
+        };
+        if data == "[DONE]" {
+            return Ok(());
+        }
+        let event: serde_json::Value = match serde_json::from_str(data) {
+            Ok(v) => v,
+            Err(_) => return Ok(()),
+        };
+
+        match event.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+            "content_block_start" => {
+                let block = event.get("content_block");
+                let field = |name: &str| {
+                    block
+                        .and_then(|b| b.get(name))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string()
+                };
+                self.current = Some(Block {
+                    kind: field("type"),
+                    data: field("data"),
+                    tool_id: field("id"),
+                    tool_name: field("name"),
+                    ..Default::default()
+                });
+            }
+            "content_block_delta" => {
+                let (Some(delta), Some(block)) = (event.get("delta"), self.current.as_mut()) else {
+                    return Ok(());
+                };
+                let piece = |name: &str| delta.get(name).and_then(|t| t.as_str());
+                match delta.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+                    "text_delta" => {
+                        if let Some(text) = piece("text") {
+                            self.text_content.push_str(text);
+                            on_token(StreamEvent {
+                                agent_id: agent_id.to_string(),
+                                event_type: StreamEventType::Token,
+                                data: serde_json::json!({"text": text}),
+                            });
+                        }
+                    }
+                    "thinking_delta" => {
+                        if let Some(thinking) = piece("thinking") {
+                            block.text.push_str(thinking);
+                            self.thinking_content.push_str(thinking);
+                            on_token(StreamEvent {
+                                agent_id: agent_id.to_string(),
+                                event_type: StreamEventType::Thinking,
+                                data: serde_json::json!({"text": thinking}),
+                            });
+                        }
+                    }
+                    "signature_delta" => {
+                        if let Some(signature) = piece("signature") {
+                            block.signature.push_str(signature);
+                        }
+                    }
+                    "input_json_delta" => {
+                        if let Some(partial) = piece("partial_json") {
+                            block.tool_input.push_str(partial);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            "content_block_stop" => {
+                let Some(block) = self.current.take() else {
+                    return Ok(());
+                };
+                match block.kind.as_str() {
+                    "tool_use" => {
+                        let arguments: serde_json::Value = serde_json::from_str(&block.tool_input)
+                            .unwrap_or(serde_json::json!({}));
+                        self.tool_calls.push(ToolCallRecord {
+                            id: block.tool_id,
+                            name: block.tool_name,
+                            arguments,
+                        });
+                    }
+                    // A signed block goes back unchanged even when its text
+                    // is empty; an unsigned one cannot be replayed at all.
+                    "thinking" if !block.signature.is_empty() => {
+                        self.thinking_blocks.push(serde_json::json!({
+                            "type": "thinking",
+                            "thinking": block.text,
+                            "signature": block.signature,
+                        }));
+                    }
+                    "redacted_thinking" => {
+                        self.thinking_blocks.push(serde_json::json!({
+                            "type": "redacted_thinking",
+                            "data": block.data,
+                        }));
+                    }
+                    _ => {}
+                }
+            }
+            "message_delta" => {
+                if let Some(reason) = event.pointer("/delta/stop_reason").and_then(|s| s.as_str()) {
+                    self.stop_reason = Some(reason.to_string());
+                }
+                if let Some(category) = event
+                    .pointer("/delta/stop_details/category")
+                    .and_then(|c| c.as_str())
+                {
+                    self.refusal_category = Some(category.to_string());
+                }
+                if let Some(usage) = event.get("usage") {
+                    let tokens =
+                        |name: &str| usage.get(name).and_then(|t| t.as_u64()).map(|t| t as u32);
+                    let prompt_tokens = tokens("input_tokens")
+                        .or(self.usage.as_ref().and_then(|u| u.prompt_tokens));
+                    self.usage = Some(UsageInfo {
+                        prompt_tokens,
+                        completion_tokens: tokens("output_tokens"),
+                        total_tokens: None,
+                    });
+                }
+            }
+            "message_start" => {
+                let input = event
+                    .pointer("/message/usage/input_tokens")
+                    .and_then(|t| t.as_u64())
+                    .map(|t| t as u32);
+                if self.usage.is_none() && input.is_some() {
+                    self.usage = Some(UsageInfo {
+                        prompt_tokens: input,
+                        completion_tokens: None,
+                        total_tokens: None,
+                    });
+                }
+            }
+            "error" => {
+                let error_msg = event
+                    .pointer("/error/message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("Unknown Anthropic API error");
+                return Err(StreamError::ApiError(format!(
+                    "Anthropic error: {}",
+                    error_msg
+                )));
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn finish(self) -> Result<AssembledResponse, StreamError> {
+        if self.stop_reason.as_deref() == Some("refusal") {
+            // A safety classifier stopped the request. There is nothing to
+            // continue from, so it surfaces as an error, not an empty reply.
+            let category = self.refusal_category.as_deref().unwrap_or("unspecified");
+            return Err(StreamError::ApiError(format!(
+                "the model declined this request (safety classifier, category: {category})"
+            )));
+        }
+        let reasoning_items = if self.thinking_blocks.is_empty() {
+            None
+        } else {
+            Some(serde_json::json!({ THINKING_BLOCKS_KEY: self.thinking_blocks }))
+        };
         Ok(AssembledResponse {
-            content: text_content,
-            tool_calls,
-            usage: usage_info,
-            finish_reason,
-            thinking_content: if thinking_content.is_empty() {
+            content: self.text_content,
+            tool_calls: self.tool_calls,
+            usage: self.usage,
+            finish_reason: self.stop_reason,
+            thinking_content: if self.thinking_content.is_empty() {
                 None
             } else {
-                Some(thinking_content)
+                Some(self.thinking_content)
             },
+            reasoning_items,
         })
     }
 }
 
 // =============================================================================
-// Tests — identical to runtime/anthropic.rs tests
+// Tests
 // =============================================================================
 
 #[cfg(test)]
@@ -798,27 +970,195 @@ mod tests {
     }
 
     #[test]
-    fn test_convert_assistant_with_thinking_preserved() {
+    fn test_signed_thinking_blocks_replay_one_for_one() {
         let messages = vec![serde_json::json!({
             "role": "assistant",
             "content": "The answer is 42.",
-            "thinking_content": "Let me reason through this..."
+            "thinking_content": "firstsecond",
+            "reasoning_items": { THINKING_BLOCKS_KEY: [
+                {"type": "thinking", "thinking": "first", "signature": "SIG1"},
+                {"type": "thinking", "thinking": "", "signature": "SIG2"},
+                {"type": "redacted_thinking", "data": "OPAQUE"},
+            ]}
         })];
         let (_, msgs) = convert_messages_to_anthropic(&messages);
-        assert_eq!(msgs.len(), 1);
         let content = msgs[0]["content"].as_array().unwrap();
-        assert_eq!(content[0]["type"], "thinking");
-        assert_eq!(content[0]["thinking"], "Let me reason through this...");
-        assert_eq!(content[1]["type"], "text");
-        assert_eq!(content[1]["text"], "The answer is 42.");
+        assert_eq!(content.len(), 4);
+        assert_eq!(content[0]["signature"], "SIG1");
+        assert_eq!(
+            content[1]["thinking"], "",
+            "an empty signed block goes back unchanged"
+        );
+        assert_eq!(content[1]["signature"], "SIG2");
+        assert_eq!(content[2]["type"], "redacted_thinking");
+        assert_eq!(content[3]["type"], "text");
+    }
+
+    #[test]
+    fn test_unsigned_or_foreign_thinking_is_never_replayed() {
+        let messages = vec![
+            // An older conversation: thinking text, no stored blocks.
+            serde_json::json!({
+                "role": "assistant",
+                "content": "The answer is 42.",
+                "thinking_content": "Let me reason through this..."
+            }),
+            serde_json::json!({"role": "user", "content": "and?"}),
+            // Reasoning items written by another provider.
+            serde_json::json!({
+                "role": "assistant",
+                "content": "Still 42.",
+                "reasoning_items": [{"type": "reasoning", "encrypted_content": "xyz"}]
+            }),
+        ];
+        let (_, msgs) = convert_messages_to_anthropic(&messages);
+        for m in [&msgs[0], &msgs[2]] {
+            let content = m["content"].as_array().unwrap();
+            assert_eq!(content.len(), 1);
+            assert_eq!(content[0]["type"], "text");
+        }
+    }
+
+    #[test]
+    fn test_adaptive_models_never_get_a_budget() {
+        for model in [
+            "claude-opus-5-5",
+            "claude-opus-4-6",
+            "claude-sonnet-5",
+            "claude-fable-5-1",
+            "claude-haiku-5-5",
+            "claude-some-future-model",
+        ] {
+            let on = thinking_request(model, true, 16_384, 4096);
+            assert_eq!(on.thinking.as_ref().unwrap()["type"], "adaptive", "{model}");
+            assert!(on.thinking.as_ref().unwrap().get("budget_tokens").is_none());
+            assert_eq!(on.max_tokens, THINKING_MAX_TOKENS_FLOOR, "{model}");
+            assert!(!on.interleaved_beta);
+
+            let off = thinking_request(model, false, 16_384, 4096);
+            assert!(off.thinking.is_none());
+            assert_eq!(off.output_config.as_ref().unwrap()["effort"], "low");
+            assert_eq!(off.max_tokens, 4096);
+        }
+        let big = thinking_request("claude-opus-5-5", true, 16_384, 200_000);
+        assert_eq!(big.max_tokens, ADAPTIVE_MAX_TOKENS_CEILING);
+    }
+
+    #[test]
+    fn test_budget_models_keep_the_manual_shape() {
+        for model in [
+            "claude-haiku-4-5",
+            "claude-haiku-4-5-20251001",
+            "claude-sonnet-4-5-20250929",
+            "claude-sonnet-4-20250514",
+            "claude-3-7-sonnet-20250219",
+        ] {
+            let on = thinking_request(model, true, 10_000, 4096);
+            let thinking = on.thinking.as_ref().unwrap();
+            assert_eq!(thinking["type"], "enabled", "{model}");
+            assert_eq!(thinking["budget_tokens"], 10_000);
+            assert_eq!(on.max_tokens, 14_096);
+            assert!(
+                on.output_config.is_none(),
+                "{model} has no effort parameter"
+            );
+            assert!(on.interleaved_beta);
+
+            let off = thinking_request(model, false, 10_000, 4096);
+            assert!(off.thinking.is_none() && off.output_config.is_none());
+        }
+    }
+
+    fn assemble(lines: &[&str]) -> Result<AssembledResponse, StreamError> {
+        let mut assembler = StreamAssembler::default();
+        for line in lines {
+            assembler.push_line(line, &|_| {}, "demo")?;
+        }
+        assembler.finish()
+    }
+
+    #[test]
+    fn test_stream_keeps_thinking_blocks_apart_with_their_signatures() {
+        let r = assemble(&[
+            r#"data: {"type":"message_start","message":{"usage":{"input_tokens":12}}}"#,
+            r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#,
+            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"first"}}"#,
+            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"SIG1"}}"#,
+            r#"data: {"type":"content_block_stop","index":0}"#,
+            r#"data: {"type":"content_block_start","index":1,"content_block":{"type":"thinking","thinking":""}}"#,
+            r#"data: {"type":"content_block_delta","index":1,"delta":{"type":"signature_delta","signature":"SIG2"}}"#,
+            r#"data: {"type":"content_block_stop","index":1}"#,
+            r#"data: {"type":"content_block_start","index":2,"content_block":{"type":"redacted_thinking","data":"OPAQUE"}}"#,
+            r#"data: {"type":"content_block_stop","index":2}"#,
+            r#"data: {"type":"content_block_start","index":3,"content_block":{"type":"text","text":""}}"#,
+            r#"data: {"type":"content_block_delta","index":3,"delta":{"type":"text_delta","text":"hello"}}"#,
+            r#"data: {"type":"content_block_stop","index":3}"#,
+            r#"data: {"type":"content_block_start","index":4,"content_block":{"type":"tool_use","id":"tu_1","name":"read_file"}}"#,
+            r#"data: {"type":"content_block_delta","index":4,"delta":{"type":"input_json_delta","partial_json":"{\"path\":"}}"#,
+            r#"data: {"type":"content_block_delta","index":4,"delta":{"type":"input_json_delta","partial_json":"\"a.txt\"}"}}"#,
+            r#"data: {"type":"content_block_stop","index":4}"#,
+            r#"data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":30}}"#,
+            r#"data: {"type":"message_stop"}"#,
+        ])
+        .unwrap();
+
+        assert_eq!(r.content, "hello");
+        assert_eq!(r.thinking_content.as_deref(), Some("first"));
+        assert_eq!(r.finish_reason.as_deref(), Some("tool_use"));
+        assert_eq!(r.tool_calls.len(), 1);
+        assert_eq!(r.tool_calls[0].arguments["path"], "a.txt");
+        let usage = r.usage.unwrap();
+        assert_eq!(
+            usage.prompt_tokens,
+            Some(12),
+            "input tokens survive the final usage event"
+        );
+        assert_eq!(usage.completion_tokens, Some(30));
+        assert_eq!(
+            r.reasoning_items.unwrap()[THINKING_BLOCKS_KEY],
+            serde_json::json!([
+                {"type": "thinking", "thinking": "first", "signature": "SIG1"},
+                {"type": "thinking", "thinking": "", "signature": "SIG2"},
+                {"type": "redacted_thinking", "data": "OPAQUE"},
+            ])
+        );
+    }
+
+    #[test]
+    fn test_a_refusal_is_an_error_not_an_empty_reply() {
+        let err = assemble(&[
+            r#"data: {"type":"message_start","message":{"usage":{"input_tokens":5}}}"#,
+            r#"data: {"type":"message_delta","delta":{"stop_reason":"refusal","stop_details":{"category":"cyber"}},"usage":{"output_tokens":0}}"#,
+        ])
+        .unwrap_err();
+        assert!(err.to_string().contains("declined"), "{err}");
+        assert!(err.to_string().contains("cyber"), "{err}");
+    }
+
+    #[test]
+    fn test_stream_error_event_surfaces() {
+        let err =
+            assemble(&[r#"data: {"type":"error","error":{"message":"overloaded"}}"#]).unwrap_err();
+        assert!(err.to_string().contains("overloaded"));
+    }
+
+    #[test]
+    fn test_line_buffer_holds_a_split_character_until_its_line_is_complete() {
+        let text = "data: caf\u{e9} \u{1f98a}\n";
+        let bytes = text.as_bytes();
+        // Split inside the four-byte character.
+        let cut = bytes.len() - 3;
+        let mut lines = LineBuffer::default();
+        assert!(lines.push(&bytes[..cut]).is_empty());
+        let out = lines.push(&bytes[cut..]);
+        assert_eq!(out, vec!["data: caf\u{e9} \u{1f98a}".to_string()]);
     }
 
     #[test]
     fn test_anthropic_provider_construction() {
-        let provider =
-            AnthropicProvider::new("test-bearer-token", "claude-sonnet-4-20250514", true, 10000);
+        let provider = AnthropicProvider::new("test-bearer-token", "claude-opus-5-5", true, 10000);
         assert_eq!(provider.name(), "Anthropic Messages");
-        assert_eq!(provider.model, "claude-sonnet-4-20250514");
+        assert_eq!(provider.model, "claude-opus-5-5");
         assert!(provider.thinking_enabled);
         assert_eq!(provider.thinking_budget, 10000);
     }

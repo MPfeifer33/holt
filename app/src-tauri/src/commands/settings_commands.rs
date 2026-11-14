@@ -184,21 +184,10 @@ pub async fn update_anthropic_settings(
     let mut needs_provider_rebuild = false;
 
     if let Some(ref m) = model {
-        let resolved = match m.as_str() {
-            // Bare aliases point at the current generation. They used to resolve to
-            // 4.5/4.6 long after those stopped being current, so picking "opus" silently
-            // selected a two-generation-old model — the same shape as an SDK lane pinned to
-            // claude-opus-4-6 while config.toml advertised claude-fable-5.
-            "opus5" | "opus" => "claude-opus-5",
-            "opus4.6" => "claude-opus-4-6",
-            "opus4.5" => "claude-opus-4-5",
-            "sonnet5" | "sonnet" => "claude-sonnet-5",
-            "sonnet4.6" => "claude-sonnet-4-6",
-            "sonnet4.5" => "claude-sonnet-4-5",
-            "haiku4.5" | "haiku" => "claude-haiku-4-5-20251001",
-            "fable5" | "fable" => "claude-fable-5",
-            other => other,
-        };
+        // Bare aliases point at the current generation; the table lives beside the
+        // model size table so the two cannot drift apart.
+        let resolved =
+            crate::runtime::context::model_sizes::claude_alias(m.as_str()).unwrap_or(m.as_str());
         settings.model = resolved.to_string();
         match &mut agent.connection {
             crate::runtime::connection::ConnectionConfig::OAuth { ref mut model, .. } => {

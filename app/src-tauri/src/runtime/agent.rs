@@ -123,7 +123,7 @@ pub struct AnthropicSettings {
 impl Default for AnthropicSettings {
     fn default() -> Self {
         Self {
-            model: "claude-opus-4-6".to_string(),
+            model: crate::runtime::context::model_sizes::DEFAULT_CLAUDE_MODEL.to_string(),
             thinking_enabled: true,
             thinking_budget: 16384,
             temperature: 1.0,

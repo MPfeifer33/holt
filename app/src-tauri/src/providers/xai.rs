@@ -336,6 +336,7 @@ impl XAIProvider {
             } else {
                 Some(thinking_content)
             },
+            reasoning_items: None,
         })
     }
 
@@ -504,6 +505,7 @@ impl XAIProvider {
             usage,
             finish_reason,
             thinking_content: None,
+            reasoning_items: None,
         })
     }
 }

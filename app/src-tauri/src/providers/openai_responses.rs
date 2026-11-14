@@ -523,6 +523,7 @@ impl StreamAccumulator {
             } else {
                 Some(self.thinking)
             },
+            reasoning_items: None,
         }
     }
 }

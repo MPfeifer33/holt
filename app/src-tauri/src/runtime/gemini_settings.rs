@@ -26,8 +26,7 @@ use serde::{Deserialize, Serialize};
 /// `generativelanguage.googleapis.com`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GeminiSettings {
-    /// Model name (e.g., "gemini-2.5-pro", "gemini-2.5-flash",
-    /// "gemini-2.5-flash-lite").
+    /// Model name (e.g., "gemini-4-carbon", "gemini-3.8-flash").
     pub model: String,
 
     /// Sampling temperature (0.0 – 2.0). `None` means use model default.
@@ -70,9 +69,9 @@ pub struct GeminiSettings {
 
 impl GeminiSettings {
     /// Returns true if this model supports thinking mode.
-    /// Currently Gemini 2.5 Pro and 2.5 Flash support thinking.
+    /// Everything from Gemini 2.5 on does; the 1.x and 2.0 lines did not.
     pub fn supports_thinking(&self) -> bool {
-        self.model.contains("2.5")
+        !(self.model.contains("gemini-1.") || self.model.contains("gemini-2.0"))
     }
 
     /// Returns true if sampling parameters should be omitted.
@@ -87,7 +86,7 @@ impl GeminiSettings {
 
 impl Default for GeminiSettings {
     /// Defaults:
-    /// - `model`: "gemini-2.5-flash" (balanced speed/quality)
+    /// - `model`: "gemini-3.8-flash" (balanced speed/quality; the 2.5 line shuts down 2026-12-01)
     /// - `temperature`, `top_p`, `top_k`, `max_output_tokens`: `None` (model defaults)
     /// - `explicit_cache_enabled`: `false` (opt-in, has cost implications)
     /// - `cache_ttl_seconds`: 3600 (1 hour)
@@ -96,7 +95,7 @@ impl Default for GeminiSettings {
     /// - `grounding_enabled`: `false` (opt-in, has cost implications)
     fn default() -> Self {
         Self {
-            model: "gemini-2.5-flash".to_string(),
+            model: "gemini-3.8-flash".to_string(),
             temperature: None,
             top_p: None,
             top_k: None,
@@ -117,7 +116,7 @@ mod tests {
     #[test]
     fn test_default_settings() {
         let s = GeminiSettings::default();
-        assert_eq!(s.model, "gemini-2.5-flash");
+        assert_eq!(s.model, "gemini-3.8-flash");
         assert!(s.temperature.is_none());
         assert!(s.top_p.is_none());
         assert!(s.top_k.is_none());
@@ -143,6 +142,11 @@ mod tests {
 
         s.model = "gemini-2.0-flash".into();
         assert!(!s.supports_thinking());
+
+        for current in ["gemini-3.8-flash", "gemini-4-carbon"] {
+            s.model = current.into();
+            assert!(s.supports_thinking(), "{current}");
+        }
     }
 
     #[test]

@@ -927,7 +927,7 @@ pub async fn run_agentic_loop(
                     outcome_tag: None,
                     thinking_content: response.thinking_content.clone(),
                     responses_phase: None,
-                    reasoning_items: None,
+                    reasoning_items: response.reasoning_items.clone(),
                 });
 
                 // Reconcile token usage
@@ -996,7 +996,7 @@ pub async fn run_agentic_loop(
                 outcome_tag: None,
                 thinking_content: response.thinking_content.clone(),
                 responses_phase: None,
-                reasoning_items: None,
+                reasoning_items: response.reasoning_items.clone(),
             });
 
             // SESSION MEMORY: Count assistant messages
