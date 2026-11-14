@@ -397,11 +397,13 @@ impl AgentSlot {
 /// Best-effort heuristic for whether a model supports image input.
 pub fn model_supports_vision(model: &str) -> bool {
     let lower = model.to_lowercase();
-    // Claude 3+ models
-    lower.contains("claude-3") || lower.contains("claude-opus")
-        || lower.contains("claude-sonnet") || lower.contains("claude-haiku")
-    // OpenAI vision models
+    // Every Claude from 3 on takes images.
+    lower.contains("claude-")
+    // OpenAI: 4o, 4.1 and everything from GPT-5 on.
         || lower.contains("gpt-4o") || lower.contains("gpt-4-vision") || lower.contains("gpt-4-turbo")
+        || lower.contains("gpt-4.1") || lower.contains("gpt-5") || lower.contains("gpt-6")
+    // Google
+        || lower.contains("gemini")
     // Grok vision models
         || lower.contains("grok-2-vision") || lower.contains("grok-4")
     // Local multimodal models
@@ -459,6 +461,9 @@ mod tests {
     fn test_model_supports_vision() {
         assert!(model_supports_vision("claude-sonnet-4-20250514"));
         assert!(model_supports_vision("gpt-4o-mini"));
+        for current in ["claude-fable-5-1", "claude-opus-5-5", "gpt-5.5", "gemini-3.8-flash", "grok-4.7"] {
+            assert!(model_supports_vision(current), "{current}");
+        }
         assert!(model_supports_vision("grok-4"));
         assert!(model_supports_vision("llava:13b"));
         assert!(!model_supports_vision("llama3"));
