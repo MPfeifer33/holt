@@ -10,7 +10,6 @@ use tokio::sync::RwLock;
 use super::a2a::A2ARegistry;
 use super::agent::{AgentSlot, AgentStatus, ContentBlock, ConversationMessage, MessageRole};
 use super::approval::ApprovalManager;
-use super::connection::ConnectionConfig;
 use super::limits::LimitCheckResult;
 use super::rate_limiter::RateLimiter;
 use super::subagent::SubagentManager;
@@ -372,8 +371,6 @@ pub async fn run_agentic_loop(
     let max_iterations = max_turns.unwrap_or(50); // 50 is the default safety cap; forks pass Some(10)
     let mut has_compacted = false; // Prevent repeated compaction within one loop invocation
     let mut consecutive_turn_limit_warnings: u32 = 0;
-    let mut has_retried_auth = false;
-    let mut refreshed_api_key: Option<String> = None;
     let a2a_send_guard = Arc::new(RwLock::new(HashSet::new()));
     // Internal wake paths (notably non-SDK A2A) can provide a transient user
     // prompt that should anchor only the FIRST successful model response of
@@ -470,7 +467,7 @@ pub async fn run_agentic_loop(
         }
 
         // STEP 1: Build context payload
-        let mut loop_payload = payload::build_loop_payload(
+        let loop_payload = payload::build_loop_payload(
             agents,
             agent_id,
             keychain,
@@ -483,43 +480,16 @@ pub async fn run_agentic_loop(
         )
         .await?;
 
-        // Override api_key with refreshed OAuth token if we retried auth
-        if let Some(ref token) = refreshed_api_key {
-            loop_payload.api_key = Some(token.clone());
-        }
-
-        // Get or build the completion provider for this agent.
-        // Provider may be pre-built (from create_agent) or needs construction
-        // here (OAuth agents whose token was resolved above, or token refresh).
+        // Get the completion provider for this agent: pre-built at creation,
+        // or built here on first use.
         let provider = {
             let agents_read = agents.read().await;
             let agent = agents_read.iter().find(|a| a.id == agent_id);
             agent.and_then(|a| a.provider.clone())
         };
         let provider = if let Some(p) = provider {
-            // If OAuth token was refreshed, rebuild provider with new token
-            if refreshed_api_key.is_some() {
-                let agents_read = agents.read().await;
-                let agent = agents_read.iter().find(|a| a.id == agent_id);
-                if let Some(agent) = agent {
-                    crate::providers::build_provider(
-                        &agent.connection,
-                        &agent.protocol,
-                        loop_payload.api_key.as_deref(),
-                        agent.anthropic_settings.as_ref(),
-                        agent.openai_responses_settings.as_ref(),
-                        agent.xai_settings.as_ref(),
-                    )
-                    .map_err(|e| EngineError::ConfigError(format!("Provider rebuild failed: {e}")))?
-                    .unwrap_or(p)
-                } else {
-                    p
-                }
-            } else {
-                p
-            }
+            p
         } else {
-            // Build provider on first use (OAuth agents, or provider wasn't set at creation)
             let agents_read = agents.read().await;
             let agent = agents_read
                 .iter()
@@ -789,38 +759,6 @@ pub async fn run_agentic_loop(
                     }
                     return Err(EngineError::Stream(StreamError::Network(e)));
                 }
-            }
-            Err(StreamError::ApiError(ref msg))
-                if msg.contains("401 Unauthorized") && !has_retried_auth =>
-            {
-                // Attempt OAuth token refresh
-                let refreshed = {
-                    let agents_read = agents.read().await;
-                    if let Some(agent) = agents_read.iter().find(|a| a.id == agent_id) {
-                        if let ConnectionConfig::OAuth {
-                            credentials_path, ..
-                        } = &agent.connection
-                        {
-                            crate::security::oauth::resolve_bearer_token(credentials_path, &client)
-                                .await
-                                .ok()
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                };
-                if let Some(new_token) = refreshed {
-                    refreshed_api_key = Some(new_token);
-                    has_retried_auth = true;
-                    continue; // retry the agentic loop
-                }
-                let mut agents = agents.write().await;
-                if let Some(agent) = agents.iter_mut().find(|a| a.id == agent_id) {
-                    agent.status = AgentStatus::Error("Authentication failed".to_string());
-                }
-                return Err(EngineError::Stream(StreamError::ApiError(msg.clone())));
             }
             Err(e) => {
                 let mut agents = agents.write().await;

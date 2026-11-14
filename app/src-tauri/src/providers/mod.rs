@@ -53,12 +53,19 @@ pub fn build_provider(
             "Codex lane is not wired to the provider layer yet".to_string(),
         )),
         AgentProtocol::AnthropicMessages => {
-            let settings =
-                anthropic_settings.ok_or(ProviderError::MissingField("anthropic_settings"))?;
-            let token = api_key.ok_or(ProviderError::MissingField("bearer_token"))?;
+            // The model is the connection's; the settings only carry the
+            // thinking switches, and default when the agent has none yet.
+            let ConnectionConfig::Api { model, .. } = connection else {
+                return Err(ProviderError::UnsupportedConnection(
+                    "the Anthropic Messages lane needs an API-key connection".to_string(),
+                ));
+            };
+            let key = api_key.ok_or(ProviderError::MissingField("api_key"))?;
+            let defaults = AnthropicSettings::default();
+            let settings = anthropic_settings.unwrap_or(&defaults);
             Ok(Some(Arc::new(AnthropicProvider::new(
-                token,
-                &settings.model,
+                key,
+                model,
                 settings.thinking_enabled,
                 settings.thinking_budget,
             ))))
@@ -131,7 +138,7 @@ pub fn detect_and_build(
 
 /// Extract endpoint URL and model name from a ConnectionConfig.
 ///
-/// Only works for Api and Local configs. Returns Err for MCP/OAuth/ClaudeCode
+/// Only works for Api and Local configs. Returns Err for MCP/OAuth/AgentSdk
 /// (those use different construction paths).
 pub fn extract_endpoint_and_model(
     connection: &ConnectionConfig,
@@ -144,13 +151,6 @@ pub fn extract_endpoint_and_model(
             let endpoint = format!("http://{}:{}/v1", host, port);
             let model = model.clone().unwrap_or_else(|| "default".to_string());
             Ok((endpoint, model))
-        }
-        ConnectionConfig::OAuth { model, .. } => {
-            // OAuth uses ANTHROPIC_API_URL, not a user-supplied endpoint
-            Ok((
-                self::anthropic::ANTHROPIC_API_URL.to_string(),
-                model.clone(),
-            ))
         }
         _ => Err(ProviderError::UnsupportedConnection(format!(
             "{:?}",
@@ -349,47 +349,73 @@ mod tests {
         assert_eq!(provider.name(), "OpenAI Responses");
     }
 
-    #[test]
-    fn test_build_provider_anthropic_requires_settings() {
-        let conn = ConnectionConfig::OAuth {
-            provider: "anthropic".into(),
-            credentials_path: "/tmp/test".into(),
-            model: "claude-sonnet-4-20250514".into(),
-        };
-        let result = build_provider(
-            &conn,
-            &AgentProtocol::AnthropicMessages,
-            Some("token"),
-            None,
-            None,
-            None,
-        );
-        assert!(result.is_err());
+    fn anthropic_api_connection() -> ConnectionConfig {
+        ConnectionConfig::Api {
+            endpoint: "https://api.anthropic.com/v1".into(),
+            api_key_ref: "demo".into(),
+            model: "claude-opus-5-5".into(),
+        }
     }
 
     #[test]
-    fn test_build_provider_anthropic_with_settings() {
+    fn test_build_provider_anthropic_requires_an_api_key() {
+        let result = build_provider(
+            &anthropic_api_connection(),
+            &AgentProtocol::AnthropicMessages,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(matches!(
+            result,
+            Err(ProviderError::MissingField("api_key"))
+        ));
+    }
+
+    #[test]
+    fn test_build_provider_anthropic_refuses_an_oauth_connection() {
         let conn = ConnectionConfig::OAuth {
             provider: "anthropic".into(),
             credentials_path: "/tmp/test".into(),
-            model: "claude-sonnet-4-20250514".into(),
-        };
-        let settings = AnthropicSettings {
-            model: "claude-sonnet-4-20250514".into(),
-            thinking_enabled: true,
-            thinking_budget: 10000,
-            temperature: 1.0,
+            model: "claude-opus-5-5".into(),
         };
         let result = build_provider(
             &conn,
             &AgentProtocol::AnthropicMessages,
             Some("token"),
-            Some(&settings),
+            None,
             None,
             None,
         );
-        let provider = result.unwrap().unwrap();
-        assert_eq!(provider.name(), "Anthropic Messages");
+        assert!(matches!(
+            result,
+            Err(ProviderError::UnsupportedConnection(_))
+        ));
+    }
+
+    #[test]
+    fn test_build_provider_anthropic_with_and_without_settings() {
+        let settings = AnthropicSettings {
+            model: "ignored-the-connection-names-the-model".into(),
+            thinking_enabled: false,
+            thinking_budget: 10000,
+            temperature: 1.0,
+        };
+        for settings in [None, Some(&settings)] {
+            let provider = build_provider(
+                &anthropic_api_connection(),
+                &AgentProtocol::AnthropicMessages,
+                Some("sk-ant-test"),
+                settings,
+                None,
+                None,
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(provider.name(), "Anthropic Messages");
+            assert!(format!("{provider:?}").contains("claude-opus-5-5"));
+        }
     }
 
     #[test]

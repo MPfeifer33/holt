@@ -461,7 +461,13 @@ mod tests {
     fn test_model_supports_vision() {
         assert!(model_supports_vision("claude-sonnet-4-20250514"));
         assert!(model_supports_vision("gpt-4o-mini"));
-        for current in ["claude-fable-5-1", "claude-opus-5-5", "gpt-5.5", "gemini-3.8-flash", "grok-4.7"] {
+        for current in [
+            "claude-fable-5-1",
+            "claude-opus-5-5",
+            "gpt-5.5",
+            "gemini-3.8-flash",
+            "grok-4.7",
+        ] {
             assert!(model_supports_vision(current), "{current}");
         }
         assert!(model_supports_vision("grok-4"));

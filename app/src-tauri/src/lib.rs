@@ -306,9 +306,6 @@ fn init_agents(config: &AppConfig) -> Vec<runtime::agent::AgentSlot> {
             crate::config::agent_config::ConnectionBlock::Api { endpoint, .. } => {
                 Some(endpoint.as_str())
             }
-            crate::config::agent_config::ConnectionBlock::OAuth { .. } => {
-                Some("https://api.anthropic.com")
-            }
             _ => None,
         };
         let context_window_size = runtime::context::resolve_context_size_with_endpoint(

@@ -81,32 +81,16 @@ pub async fn build_loop_payload(
         ConnectionConfig::McpStdio { .. } => {
             return Err(EngineError::NoEndpoint);
         }
-        ConnectionConfig::OAuth {
-            provider,
-            credentials_path,
-            model,
-            ..
-        } => {
+        ConnectionConfig::OAuth { provider, .. } => {
             if crate::runtime::codex::is_codex_provider(provider) {
                 return Err(EngineError::ConfigError(
                     "Codex lane exists, but its execution path is not wired yet".to_string(),
                 ));
             }
-            let oauth_client = app_state
-                .as_ref()
-                .map(|s| s.http_client.clone())
-                .unwrap_or_else(reqwest::Client::new);
-            let token =
-                crate::security::oauth::resolve_bearer_token(credentials_path, &oauth_client)
-                    .await
-                    .map_err(|e| {
-                        EngineError::NetworkError(format!("OAuth credential error: {e}"))
-                    })?;
-            (
-                "https://api.anthropic.com/v1/messages".to_string(),
-                Some(token),
-                model.clone(),
-            )
+            return Err(EngineError::ConfigError(format!(
+                "OAuth connections for provider '{provider}' are not supported. For Claude, use an \
+                 API-key connection to https://api.anthropic.com/v1, or the Agent SDK lane."
+            )));
         }
         ConnectionConfig::AgentSdk => {
             // Claude Code SDK agents use a separate execution path (claude_sdk.rs)

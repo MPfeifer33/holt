@@ -4,16 +4,26 @@ use super::connection::{AgentProtocol, ConnectionConfig};
 pub fn preferred_protocol(connection: &ConnectionConfig) -> AgentProtocol {
     match connection {
         ConnectionConfig::McpStdio { .. } => AgentProtocol::Mcp,
-        ConnectionConfig::OAuth { provider, .. } => {
-            if crate::runtime::codex::is_codex_provider(provider) {
-                AgentProtocol::Codex
-            } else {
-                AgentProtocol::AnthropicMessages
-            }
+        // The only OAuth connection is the Codex lane, which signs in through
+        // the Codex CLI. Anything else falls through to the default and is
+        // refused when a turn is built.
+        ConnectionConfig::OAuth { provider, .. }
+            if crate::runtime::codex::is_codex_provider(provider) =>
+        {
+            AgentProtocol::Codex
+        }
+        // An API-key connection to Anthropic speaks the native Messages API.
+        ConnectionConfig::Api { endpoint, .. } if is_anthropic_endpoint(endpoint) => {
+            AgentProtocol::AnthropicMessages
         }
         ConnectionConfig::AgentSdk => AgentProtocol::AgentSdk,
         _ => AgentProtocol::default(),
     }
+}
+
+/// Whether an endpoint is Anthropic's own API host.
+pub fn is_anthropic_endpoint(endpoint: &str) -> bool {
+    endpoint.to_ascii_lowercase().contains("api.anthropic.com")
 }
 
 /// Normalize a user-configured base URL by stripping trailing slashes and a
@@ -56,6 +66,11 @@ pub async fn negotiate_protocol(
             // TODO: Implement real MCP stdio handshake via rmcp when integrated
             // For now, return Mcp protocol (will be connected when engine runs)
             Ok(AgentProtocol::Mcp)
+        }
+
+        // Anthropic's own host speaks the native Messages API; nothing to probe.
+        ConnectionConfig::Api { endpoint, .. } if is_anthropic_endpoint(endpoint) => {
+            Ok(AgentProtocol::AnthropicMessages)
         }
 
         ConnectionConfig::Api { endpoint, .. } => {
@@ -160,14 +175,33 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
-    fn test_preferred_protocol_keeps_anthropic_oauth_on_messages() {
+    fn test_preferred_protocol_routes_an_anthropic_api_key_to_messages() {
+        let connection = ConnectionConfig::Api {
+            endpoint: "https://api.anthropic.com/v1".to_string(),
+            api_key_ref: "demo".to_string(),
+            model: crate::runtime::context::model_sizes::DEFAULT_CLAUDE_MODEL.to_string(),
+        };
+        assert_eq!(
+            preferred_protocol(&connection),
+            AgentProtocol::AnthropicMessages
+        );
+
+        let other = ConnectionConfig::Api {
+            endpoint: "https://api.openai.com/v1".to_string(),
+            api_key_ref: "demo".to_string(),
+            model: "gpt-5.5".to_string(),
+        };
+        assert_eq!(preferred_protocol(&other), AgentProtocol::default());
+    }
+
+    #[test]
+    fn test_preferred_protocol_has_no_anthropic_oauth_lane() {
         let connection = ConnectionConfig::OAuth {
             provider: "anthropic".to_string(),
             credentials_path: std::path::PathBuf::from("/tmp/credentials.json"),
             model: crate::runtime::context::model_sizes::DEFAULT_CLAUDE_MODEL.to_string(),
         };
-
-        assert_eq!(
+        assert_ne!(
             preferred_protocol(&connection),
             AgentProtocol::AnthropicMessages
         );

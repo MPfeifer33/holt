@@ -1,15 +1,16 @@
-// providers/anthropic.rs — Anthropic Messages API provider (OAuth path).
+// providers/anthropic.rs — Anthropic Messages API provider (API key).
 //
-// The OAuth headers, Claude Code identity headers, tool conversion and cache
-// block layout are unchanged from the original runtime/anthropic.rs.
+// Authenticates with an Anthropic API key (`x-api-key`) and sends the agent's
+// own system prompt in the `system` field, split into cached blocks.
 //
-// Request and stream shape were brought up to the current Messages API in
-// November 2026: models from 4.6 on think adaptively (`thinking.type =
-// "adaptive"`, depth via `output_config.effort`) and reject a manual
-// `budget_tokens`; 4.5 and earlier keep the manual budget. Thinking blocks
-// are kept apart with their signatures and replayed exactly as received.
-// These changes are covered by the unit tests below; they have not been
-// exercised against the live API from this repository.
+// Request and stream shape follow the current Messages API (November 2026):
+// models from 4.6 on think adaptively (`thinking.type = "adaptive"`, depth via
+// `output_config.effort`) and reject a manual `budget_tokens`; 4.5 and earlier
+// keep the manual budget. Thinking blocks are kept apart with their signatures
+// and replayed exactly as received.
+//
+// Covered by the unit tests below; not exercised against the live API from
+// this repository.
 
 use futures::StreamExt;
 
@@ -18,7 +19,7 @@ use crate::runtime::agent::ToolCallRecord;
 use crate::runtime::cache::sentinels;
 
 // =============================================================================
-// Constants — identical to runtime/anthropic.rs
+// Constants
 // =============================================================================
 
 /// Anthropic API endpoint constant.
@@ -26,14 +27,6 @@ pub const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
 
 /// Anthropic API version header.
 const ANTHROPIC_VERSION: &str = "2023-06-01";
-
-/// Required beta headers for OAuth token authentication.
-const OAUTH_BETA: &str = "oauth-2025-04-20";
-const CLAUDE_CODE_BETA: &str = "claude-code-20250219";
-
-/// Claude Code identity headers required by Anthropic API for OAuth access.
-const CLAUDE_CLI_USER_AGENT: &str = "claude-cli/2.1.81";
-const CLAUDE_CODE_SYSTEM_PREFIX: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
 
 /// Interleaved thinking is automatic under adaptive thinking; only the
 /// manual-budget models still need the header.
@@ -127,6 +120,41 @@ pub(crate) fn thinking_request(
     }
 }
 
+/// The JSON body of a Messages request.
+pub(crate) fn request_body(
+    model: &str,
+    system_blocks: Vec<serde_json::Value>,
+    messages: Vec<serde_json::Value>,
+    tools: Option<Vec<serde_json::Value>>,
+    thinking: &ThinkingRequest,
+) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "model": model,
+        "max_tokens": thinking.max_tokens,
+        "stream": true,
+        "messages": messages,
+    });
+    if !system_blocks.is_empty() {
+        body["system"] = serde_json::Value::Array(system_blocks);
+    }
+    if let Some(mut tools) = tools {
+        // cache_control on the last tool lets the tool list be cached.
+        if let Some(last_tool) = tools.last_mut() {
+            last_tool["cache_control"] = serde_json::json!({ "type": "ephemeral" });
+        }
+        if !tools.is_empty() {
+            body["tools"] = serde_json::Value::Array(tools);
+        }
+    }
+    if let Some(t) = &thinking.thinking {
+        body["thinking"] = t.clone();
+    }
+    if let Some(output_config) = &thinking.output_config {
+        body["output_config"] = output_config.clone();
+    }
+    body
+}
+
 /// The thinking blocks of a stored assistant message that may be sent back:
 /// only blocks this provider received and stored itself. Thinking text
 /// without a signature (older conversations, other providers) is never
@@ -159,7 +187,7 @@ impl LineBuffer {
 }
 
 // =============================================================================
-// Message/tool conversion helpers — identical to runtime/anthropic.rs
+// Message/tool conversion helpers
 // =============================================================================
 
 /// Convert OpenAI-format tool definitions to Anthropic format.
@@ -437,21 +465,16 @@ pub fn convert_messages_to_anthropic(
 
 #[derive(Debug)]
 pub struct AnthropicProvider {
-    pub(crate) bearer_token: String,
+    pub(crate) api_key: String,
     pub(crate) model: String,
     pub(crate) thinking_enabled: bool,
     pub(crate) thinking_budget: u32,
 }
 
 impl AnthropicProvider {
-    pub fn new(
-        bearer_token: &str,
-        model: &str,
-        thinking_enabled: bool,
-        thinking_budget: u32,
-    ) -> Self {
+    pub fn new(api_key: &str, model: &str, thinking_enabled: bool, thinking_budget: u32) -> Self {
         Self {
-            bearer_token: bearer_token.to_string(),
+            api_key: api_key.to_string(),
             model: model.to_string(),
             thinking_enabled,
             thinking_budget,
@@ -474,7 +497,7 @@ impl CompletionProvider for AnthropicProvider {
         on_token: &(dyn Fn(StreamEvent) + Send + Sync),
         agent_id: &str,
     ) -> Result<AssembledResponse, StreamError> {
-        let (system_prompt, mut anthropic_messages) = convert_messages_to_anthropic(messages);
+        let (system_prompt, anthropic_messages) = convert_messages_to_anthropic(messages);
         let mut anthropic_tools = tools.map(convert_tools_to_anthropic);
 
         // max_tokens covers ALL output (thinking + response combined). The
@@ -487,46 +510,11 @@ impl CompletionProvider for AnthropicProvider {
         );
         let effective_max_tokens = thinking_req.max_tokens;
 
-        // OAuth requires system prompt to be EXACTLY the Claude Code prefix.
-        // Any custom system/persona content must go as a prefixed user message.
-        // Split on cache sentinels to create multiple content blocks with cache_control,
-        // enabling Anthropic's prompt caching to cache the stable prefix independently
-        // of dynamic content (memory, skills) that changes every turn.
-        if !system_prompt.is_empty() {
-            let cache_blocks = build_cached_system_blocks(&system_prompt);
-
-            let first_is_user = anthropic_messages
-                .first()
-                .and_then(|m| m.get("role"))
-                .and_then(|r| r.as_str())
-                == Some("user");
-
-            if first_is_user {
-                if let Some(first_msg) = anthropic_messages.first_mut() {
-                    let existing_content = first_msg.get("content").cloned();
-                    let mut blocks = cache_blocks;
-                    // Append the existing first user message content as a final block
-                    match existing_content {
-                        Some(serde_json::Value::String(s)) if !s.is_empty() => {
-                            blocks.push(serde_json::json!({"type": "text", "text": s}));
-                        }
-                        Some(serde_json::Value::Array(arr)) => {
-                            blocks.extend(arr);
-                        }
-                        _ => {}
-                    }
-                    first_msg["content"] = serde_json::Value::Array(blocks);
-                }
-            } else {
-                anthropic_messages.insert(
-                    0,
-                    serde_json::json!({
-                        "role": "user",
-                        "content": cache_blocks,
-                    }),
-                );
-            }
-        }
+        // The system prompt goes in the `system` field, split on cache
+        // sentinels into blocks with cache_control, so the stable prefix is
+        // cached independently of dynamic content (memory, skills) that
+        // changes every turn.
+        let system_blocks = build_cached_system_blocks(&system_prompt);
 
         // Debug: dump message structure before sending
         for (i, msg) in anthropic_messages.iter().enumerate() {
@@ -570,64 +558,41 @@ impl CompletionProvider for AnthropicProvider {
             tracing::info!("anthropic msg[{}]: {} -> {}", i, role, desc);
         }
 
-        let mut body = serde_json::json!({
-            "model": self.model,
-            "max_tokens": effective_max_tokens,
-            "stream": true,
-            "system": [{
-                "type": "text",
-                "text": CLAUDE_CODE_SYSTEM_PREFIX,
-                "cache_control": { "type": "ephemeral" }
-            }],
-            "messages": anthropic_messages,
-        });
+        let tool_count = anthropic_tools.as_ref().map(|t| t.len()).unwrap_or(0);
+        let message_count = anthropic_messages.len();
+        let body = request_body(
+            &self.model,
+            system_blocks,
+            anthropic_messages,
+            anthropic_tools.take(),
+            &thinking_req,
+        );
 
-        if let Some(ref mut tools) = anthropic_tools {
-            // Add cache_control to last tool for prompt cache reuse
-            if let Some(last_tool) = tools.last_mut() {
-                last_tool["cache_control"] = serde_json::json!({ "type": "ephemeral" });
-            }
-            if !tools.is_empty() {
-                body["tools"] = serde_json::json!(tools);
-            }
-        }
-
-        if let Some(thinking) = &thinking_req.thinking {
-            body["thinking"] = thinking.clone();
-        }
-        if let Some(output_config) = &thinking_req.output_config {
-            body["output_config"] = output_config.clone();
-        }
-
-        // Build beta header: OAuth + Claude Code identity. Prompt caching and
-        // adaptive interleaved thinking are generally available and need none.
-        let mut betas = vec![CLAUDE_CODE_BETA.to_string(), OAUTH_BETA.to_string()];
-        if thinking_req.interleaved_beta {
-            betas.push(INTERLEAVED_THINKING_BETA.to_string());
-        }
-        let anthropic_beta = betas.join(",");
+        // Prompt caching and adaptive interleaved thinking are generally
+        // available; only the manual-budget models need a beta header.
+        let anthropic_beta = thinking_req
+            .interleaved_beta
+            .then_some(INTERLEAVED_THINKING_BETA);
 
         tracing::info!(
             model = %self.model,
             effective_max_tokens,
             thinking_enabled = self.thinking_enabled,
             thinking_budget = self.thinking_budget,
-            message_count = anthropic_messages.len(),
+            message_count,
             has_system = !system_prompt.is_empty(),
-            has_tools = anthropic_tools.as_ref().map(|t| t.len()).unwrap_or(0),
+            has_tools = tool_count,
             "Anthropic request"
         );
 
-        let request = client
+        let mut request = client
             .post(ANTHROPIC_API_URL)
-            .header("Authorization", format!("Bearer {}", self.bearer_token))
+            .header("x-api-key", &self.api_key)
             .header("anthropic-version", ANTHROPIC_VERSION)
-            .header("anthropic-beta", &anthropic_beta)
-            .header("content-type", "application/json")
-            .header("accept", "application/json")
-            .header("anthropic-dangerous-direct-browser-access", "true")
-            .header("user-agent", CLAUDE_CLI_USER_AGENT)
-            .header("x-app", "cli");
+            .header("content-type", "application/json");
+        if let Some(beta) = anthropic_beta {
+            request = request.header("anthropic-beta", beta);
+        }
 
         let resp = request
             .json(&body)
@@ -646,7 +611,7 @@ impl CompletionProvider for AnthropicProvider {
         }
         if status == reqwest::StatusCode::UNAUTHORIZED {
             return Err(StreamError::ApiError(
-                "401 Unauthorized — OAuth token may be expired".to_string(),
+                "401 Unauthorized — check the Anthropic API key".to_string(),
             ));
         }
         if !status.is_success() {
@@ -657,7 +622,7 @@ impl CompletionProvider for AnthropicProvider {
                 self.model,
                 effective_max_tokens,
                 self.thinking_enabled,
-                anthropic_messages.len()
+                message_count
             );
             return Err(StreamError::ApiError(format!(
                 "Anthropic API error {}: {}",
@@ -1069,6 +1034,54 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_request_body_carries_the_agents_own_system_prompt() {
+        use crate::runtime::cache::sentinels::CACHE_SENTINEL_1HR;
+
+        let messages = vec![
+            serde_json::json!({"role": "system", "content": format!("You are a careful reviewer.{}today's notes", CACHE_SENTINEL_1HR)}),
+            serde_json::json!({"role": "user", "content": "Hello"}),
+        ];
+        let (system, msgs) = convert_messages_to_anthropic(&messages);
+        let tools = convert_tools_to_anthropic(&[serde_json::json!({
+            "type": "function",
+            "function": {"name": "read_file", "description": "Read a file", "parameters": {"type": "object"}}
+        })]);
+        let body = request_body(
+            "claude-opus-5-5",
+            build_cached_system_blocks(&system),
+            msgs,
+            Some(tools),
+            &thinking_request("claude-opus-5-5", true, 16_384, 4096),
+        );
+
+        let system = body["system"].as_array().unwrap();
+        assert_eq!(system.len(), 2);
+        assert_eq!(system[0]["text"], "You are a careful reviewer.");
+        assert_eq!(system[0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(system[1]["text"], "today's notes");
+        // The first user message is the user's, untouched.
+        assert_eq!(body["messages"][0]["content"], "Hello");
+        assert_eq!(body["tools"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        assert!(body.get("temperature").is_none());
+    }
+
+    #[test]
+    fn test_request_body_without_a_system_prompt_sends_no_system_field() {
+        let body = request_body(
+            "claude-haiku-4-5",
+            Vec::new(),
+            vec![serde_json::json!({"role": "user", "content": "hi"})],
+            None,
+            &thinking_request("claude-haiku-4-5", false, 0, 1000),
+        );
+        assert!(body.get("system").is_none());
+        assert!(body.get("tools").is_none());
+        assert!(body.get("thinking").is_none());
+        assert_eq!(body["max_tokens"], 1000);
+    }
+
     fn assemble(lines: &[&str]) -> Result<AssembledResponse, StreamError> {
         let mut assembler = StreamAssembler::default();
         for line in lines {
@@ -1156,7 +1169,7 @@ mod tests {
 
     #[test]
     fn test_anthropic_provider_construction() {
-        let provider = AnthropicProvider::new("test-bearer-token", "claude-opus-5-5", true, 10000);
+        let provider = AnthropicProvider::new("test-api-key", "claude-opus-5-5", true, 10000);
         assert_eq!(provider.name(), "Anthropic Messages");
         assert_eq!(provider.model, "claude-opus-5-5");
         assert!(provider.thinking_enabled);

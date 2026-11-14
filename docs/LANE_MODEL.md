@@ -15,7 +15,7 @@ One heads-up before you grep: "lane" is presentation language — there is no
 | Wire protocol | `AgentProtocol` | `runtime/connection.rs` |
 | Turn routing | `ProtocolKind` | `runtime/turn_manager.rs` |
 
-A connection (API endpoint, local host:port, OAuth, or the SDK bridge)
+A connection (API endpoint, local host:port, Codex sign-in, or the SDK bridge)
 *determines* the protocol — `preferred_protocol()` derives it, and editing a
 connection re-derives it, so the two can't drift. For routing, the protocols
 collapse into three `ProtocolKind`s, and that three-way split is the truest
@@ -47,13 +47,17 @@ tool calls in-process, iterate. The only driver where Holt owns the loop.
 
 Providers are picked by **endpoint substring**, not configuration: Google's
 URL gets the Gemini provider, xAI's gets xAI, OpenAI's gets the Responses
-API, and *anything else* falls to open-standard Chat Completions. That
+API, Anthropic's gets the Messages provider, and *anything else* falls to
+open-standard Chat Completions. That
 fallback is why **local models aren't a separate lane**: a
 `Local { host, port }` connection synthesizes `http://host:port/v1` and
 rides the same path as any cloud endpoint. Holt also auto-detects running
 local servers (Ollama, LM Studio, llama-server) and asks each for its real
-context-window size rather than guessing. Anthropic OAuth connections skip
-detection and use a fixed endpoint.
+context-window size rather than guessing. An API-key connection to
+`api.anthropic.com` skips detection and speaks the native Messages API
+(`x-api-key`, the agent's own system prompt). There is no Claude subscription
+sign-in on this driver: a Claude subscription is used through the Agent SDK
+bridge below, which runs the unmodified Claude Code binary.
 
 ## Driver 2: the Agent SDK bridge
 

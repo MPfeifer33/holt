@@ -201,7 +201,6 @@ pub async fn create_agent(
     let endpoint_for_ctx = match &connection {
         ConnectionConfig::Api { endpoint, .. } => Some(endpoint.clone()),
         ConnectionConfig::Local { host, port, .. } => Some(format!("http://{}:{}/v1", host, port)),
-        ConnectionConfig::OAuth { .. } => Some("https://api.anthropic.com".to_string()),
         _ => None,
     };
     let context_window_size = crate::runtime::context::resolve_context_size_with_endpoint(
