@@ -130,6 +130,115 @@ pub struct PermissionRequest {
     pub request_id: String,
 }
 
+// ── Permission requests ─────────────────────────────────────────────────
+// The bridge's `canUseTool` asks before a native tool runs. The reader puts
+// those on the tool channel under this prefix; they are answered with a
+// `permission_response` once the user answers the approval card.
+
+const PERMISSION_PREFIX: &str = "__permission__";
+/// How long a card may go unanswered. Shorter than the bridge's own
+/// five-minute rejection, so the model always gets a reason.
+const PERMISSION_WAIT: Duration = Duration::from_secs(280);
+
+/// The approval card for a native tool the SDK agent wants to run. Keyed
+/// by the bridge's request id so `respond_to_approval` resolves it.
+fn permission_card(
+    agent_id: &str,
+    tool: &str,
+    request: &ToolRequest,
+    working_directory: &str,
+) -> crate::runtime::approval::ApprovalRequestEvent {
+    crate::runtime::approval::ApprovalRequestEvent {
+        agent_id: agent_id.to_string(),
+        tool_call_id: request.request_id.clone(),
+        tool_name: tool.to_string(),
+        arguments_preview: serde_json::to_string(&request.args)
+            .unwrap_or_default()
+            .chars()
+            .take(400)
+            .collect(),
+        tool_description: format!("Claude Code wants to run {tool}"),
+        working_directory: working_directory.to_string(),
+        tier: "require_approval".into(),
+        tier_reason: "Native tool on the Agent SDK lane".into(),
+        timeout_seconds: Some(PERMISSION_WAIT.as_secs() as u32),
+    }
+}
+
+/// What the bridge is told. `None` means nobody answered in time.
+fn permission_reply(request_id: &str, approved: Option<bool>, input: &Value) -> Value {
+    match approved {
+        Some(true) => json!({
+            "type": "permission_response",
+            "requestId": request_id,
+            "allow": true,
+            "updatedInput": input,
+        }),
+        Some(false) => json!({
+            "type": "permission_response",
+            "requestId": request_id,
+            "allow": false,
+            "denyMessage": "Denied by the user in Holt",
+        }),
+        None => json!({
+            "type": "permission_response",
+            "requestId": request_id,
+            "allow": false,
+            "denyMessage": "No answer to the approval request in time; the tool was not run",
+        }),
+    }
+}
+
+/// The user's answer, or `None` when the wait runs out or the request is
+/// cancelled.
+async fn wait_for_permission(
+    answer: tokio::sync::oneshot::Receiver<bool>,
+    wait: Duration,
+) -> Option<bool> {
+    tokio::time::timeout(wait, answer).await.ok()?.ok()
+}
+
+/// Raise the approval card for one permission request and wait for it.
+async fn answer_permission_request(
+    agent_id: &str,
+    tool: &str,
+    request: &ToolRequest,
+    app_state: &Arc<AppState>,
+    app_handle: Option<&tauri::AppHandle>,
+) -> Value {
+    let working_directory = {
+        let agents = app_state.agents.read().await;
+        agents
+            .iter()
+            .find(|a| a.id == agent_id)
+            .map(|a| a.working_directory.display().to_string())
+            .unwrap_or_default()
+    };
+    let key = format!("{agent_id}:{}", request.request_id);
+    let answer = app_state.approval_manager.register(&key).await;
+    let card = permission_card(agent_id, tool, request, &working_directory);
+    let shown = match app_handle {
+        Some(handle) => {
+            use tauri::Emitter;
+            handle
+                .emit("agent-hil-approval", &card)
+                .map_err(|e| tracing::warn!(agent_id, "approval card not shown: {e}"))
+                .is_ok()
+        }
+        None => false,
+    };
+    let approved = if shown {
+        wait_for_permission(answer, PERMISSION_WAIT).await
+    } else {
+        None
+    };
+    if approved.is_none() {
+        // Timed out or never shown: drop the registration so a late click finds nothing stale.
+        app_state.approval_manager.resolve(&key, false).await;
+    }
+    permission_reply(&request.request_id, approved, &request.args)
+}
+
 // ── Pure mapping functions ──────────────────────────────────────────────
 
 /// Map an NDJSON event into a typed Tauri event payload.
@@ -559,7 +668,7 @@ async fn spawn_bridge_process(
                         // (Rust handles routing to approval system)
                         "permission_request" => {
                             let name = format!(
-                                "__permission__{}",
+                                "{PERMISSION_PREFIX}{}",
                                 event
                                     .fields
                                     .get("tool")
@@ -1145,6 +1254,36 @@ pub async fn get_or_spawn_bridge(
     let app_handle_tools = app_handle.cloned();
     let tool_task = tauri::async_runtime::spawn(async move {
         while let Some(request) = tool_requests_rx.recv().await {
+            if let Some(tool) = request
+                .name
+                .strip_prefix(PERMISSION_PREFIX)
+                .map(str::to_string)
+            {
+                // A card can sit for minutes; it must not hold up tool calls.
+                let agent_id = agent_id_tools.clone();
+                let app_state = Arc::clone(&app_state_tools);
+                let app_handle = app_handle_tools.clone();
+                tauri::async_runtime::spawn(async move {
+                    let reply = answer_permission_request(
+                        &agent_id,
+                        &tool,
+                        &request,
+                        &app_state,
+                        app_handle.as_ref(),
+                    )
+                    .await;
+                    let bridges = BRIDGES.read().await;
+                    if let Some(entry) = bridges.get(&agent_id) {
+                        if let Err(e) = entry.write_line(&reply).await {
+                            tracing::warn!(
+                                agent_id,
+                                "permission answer not delivered to the bridge: {e}"
+                            );
+                        }
+                    }
+                });
+                continue;
+            }
             let result = handle_tool_request(
                 &agent_id_tools,
                 &request,
@@ -1667,6 +1806,67 @@ fn resolve_sdk_model(agent: &AgentSlot, global: &AgentSdkBlock) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn permission(tool: &str) -> ToolRequest {
+        ToolRequest {
+            name: format!("{PERMISSION_PREFIX}{tool}"),
+            args: json!({"command": "rm -rf build"}),
+            request_id: "perm-7".into(),
+        }
+    }
+
+    #[test]
+    fn a_permission_request_becomes_an_approval_card_keyed_by_its_request_id() {
+        let card = permission_card("agent-1", "Bash", &permission("Bash"), "/work");
+        assert_eq!(card.agent_id, "agent-1");
+        assert_eq!(
+            card.tool_call_id, "perm-7",
+            "the card's answer must resolve this exact request"
+        );
+        assert_eq!(card.tool_name, "Bash");
+        assert!(card.arguments_preview.contains("rm -rf build"));
+        assert_eq!(card.working_directory, "/work");
+        assert_eq!(card.tier, "require_approval");
+        assert_eq!(card.timeout_seconds, Some(PERMISSION_WAIT.as_secs() as u32));
+    }
+
+    #[test]
+    fn the_bridge_is_answered_with_a_permission_response_not_a_tool_response() {
+        let input = json!({"command": "ls"});
+        let allow = permission_reply("perm-7", Some(true), &input);
+        assert_eq!(
+            allow,
+            json!({"type": "permission_response", "requestId": "perm-7", "allow": true, "updatedInput": {"command": "ls"}})
+        );
+        let deny = permission_reply("perm-7", Some(false), &input);
+        assert_eq!(deny["type"], "permission_response");
+        assert_eq!(deny["allow"], false);
+        assert_eq!(deny["denyMessage"], "Denied by the user in Holt");
+        let timed_out = permission_reply("perm-7", None, &input);
+        assert_eq!(timed_out["allow"], false);
+        assert!(timed_out["denyMessage"]
+            .as_str()
+            .unwrap()
+            .contains("No answer"));
+    }
+
+    #[tokio::test]
+    async fn an_approval_answer_reaches_the_waiting_permission_request() {
+        let manager = crate::runtime::approval::ApprovalManager::new();
+        let rx = manager.register("agent-1:perm-7").await;
+        assert!(manager.resolve("agent-1:perm-7", true).await);
+        assert_eq!(
+            wait_for_permission(rx, Duration::from_secs(1)).await,
+            Some(true)
+        );
+
+        let rx = manager.register("agent-1:perm-8").await;
+        assert_eq!(
+            wait_for_permission(rx, Duration::from_millis(20)).await,
+            None,
+            "no answer is a timeout, not an approval"
+        );
+    }
 
     #[test]
     fn test_map_token_event() {
