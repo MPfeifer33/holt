@@ -63,7 +63,12 @@ npm run check              # frontend type/lint check
 - 2026-09-28: three security fixes ported from the predecessor's audit
   (`start_process` honours the sandbox; unreadable agent config fails closed;
   credentials file stays 0600) — see `docs/RELEASE_NOTES.md`.
-- Backend tests: 865 passing (one, `test_hash_deterministic`, needs the
+- 2026-11-13: staleness pass. Anthropic lane on an API key with the current
+  request shape (subscription sign-in removed); one current model table; Agent
+  SDK 0.3.322 with approvals wired; Codex lane fixes; `hillock-core` 0.0.2 and
+  honest memory tools; scheduled maintenance; dependency patches. Unit-tested
+  only, not run live. See `docs/RELEASE_NOTES.md`.
+- Backend tests: 942 passing, memory engine 126 (one, `test_hash_deterministic`, needs the
   embedding model cached locally; a fresh clone without network will fail it).
   Frontend check/build/audit: clean. Memory-system
   representation verified against hillock-core source (rotation.rs); tier

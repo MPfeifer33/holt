@@ -10,7 +10,7 @@ the file it names.*
 cargo test --manifest-path app/src-tauri/Cargo.toml
 ```
 
-865 pass. If one named `test_hash_deterministic` fails on a fresh clone, it needs
+942 pass. If one named `test_hash_deterministic` fails on a fresh clone, it needs
 the embedding model cached locally; everything else is hermetic.
 
 **1. `docs/LANE_MODEL.md` (four minutes).** What an "agent lane" is: a named agent

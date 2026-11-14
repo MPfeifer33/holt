@@ -64,21 +64,15 @@ impl Tool for UnpinMemoryTool {
             .await
             .map_err(unpin_error)?;
 
-        if !was_pinned {
-            // Nothing was released, so this is not a success to report.
-            return Err(ToolError {
-                code: ToolErrorCode::InvalidInput,
-                message: NOT_PINNED_MESSAGE.to_string(),
-                retryable: false,
-            });
-        }
-
+        // Unpinning something that was not pinned changes nothing and is
+        // not a failure; the result says which of the two happened.
         Ok(ToolResult {
             content: json!({
                 "success": true,
                 "memory_id": memory_id,
                 "pinned": false,
-                "message": UNPINNED_MESSAGE
+                "was_pinned": was_pinned,
+                "message": if was_pinned { UNPINNED_MESSAGE } else { NOT_PINNED_MESSAGE }
             }),
             truncated: false,
             trace_id: None,
@@ -91,8 +85,8 @@ impl Tool for UnpinMemoryTool {
 const UNPINNED_MESSAGE: &str =
     "Memory unpinned: the slot is free, and the memory decays and ranks like any other again";
 
-/// The engine's unpin succeeds whether or not there was a pin. The tool does not.
-const NOT_PINNED_MESSAGE: &str = "Memory not unpinned: it was not pinned, so nothing changed";
+/// Said when there was no pin to release.
+const NOT_PINNED_MESSAGE: &str = "Nothing to unpin: the memory was not pinned, so nothing changed";
 
 fn unpin_error(e: crate::memory::MemoryError) -> ToolError {
     use crate::memory::MemoryError;

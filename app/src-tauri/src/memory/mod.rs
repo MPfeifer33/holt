@@ -264,11 +264,6 @@ impl MemoryEngine {
         self.hillock.query_memories_by_metadata(args).await
     }
 
-    /// Set tier on a memory.
-    pub async fn set_tier(&self, id: &str, _agent_ns: &str, tier: &str) -> Result<(), MemoryError> {
-        self.hillock.set_tier(id, tier, None).await
-    }
-
     /// Pin a memory: validate cap (max 5) and token size (~1K), then pin it for the
     /// calling agent. Returns how many pins that agent now holds.
     pub async fn pin(&self, id: &str, agent_ns: &str) -> Result<u8, MemoryError> {
@@ -331,11 +326,11 @@ impl MemoryEngine {
         &self,
         summary: &str,
         source_memory_ids: &[String],
-        source: &str,
+        agent_ns: &str,
         tags: &[String],
     ) -> Result<serde_json::Value, MemoryError> {
         self.hillock
-            .crystallize(summary, source_memory_ids, source, tags)
+            .crystallize(summary, source_memory_ids, agent_ns, tags)
             .await
     }
 

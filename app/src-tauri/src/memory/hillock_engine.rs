@@ -930,32 +930,6 @@ impl EmbeddedHillock {
         Ok(was_pinned)
     }
 
-    /// Legacy tier setter, kept for `memory_crystallize`'s "demote the sources" step.
-    /// There are no tiers in the engine: `pinned: Some(true)` pins under the default
-    /// agent and anything else releases a default-agent pin. The memory tools do not use
-    /// this; they go through [`Self::pin`] and [`Self::unpin`].
-    pub async fn set_tier(
-        &self,
-        memory_id: &str,
-        _tier: &str,
-        pinned: Option<bool>,
-    ) -> Result<(), MemoryError> {
-        let id = parse_memory_id(memory_id)?;
-        let agent_id = &self.default_agent_id;
-        if pinned == Some(true) {
-            self.engine
-                .pin(agent_id, id)
-                .await
-                .map_err(|e| MemoryError::Database(format!("Pin failed: {e}")))?;
-        } else {
-            self.engine
-                .unpin(agent_id, id)
-                .await
-                .map_err(|e| MemoryError::Database(format!("Unpin failed: {e}")))?;
-        }
-        Ok(())
-    }
-
     /// Get memories by tier. Maps hot→pinned, warm→high importance, cold→low importance.
     pub async fn get_by_tier(
         &self,
@@ -1059,10 +1033,12 @@ impl EmbeddedHillock {
         &self,
         summary: &str,
         source_memory_ids: &[String],
-        _source: &str,
+        agent_ns: &str,
         tags: &[String],
     ) -> Result<serde_json::Value, MemoryError> {
-        let agent_id = &self.default_agent_id;
+        // Runs as the calling agent: the concept lands in the caller's own
+        // space, beside the sources it replaces.
+        let agent_id = &self.resolve_agent_id(agent_ns);
         let source_ids: Result<Vec<Uuid>, _> = source_memory_ids
             .iter()
             .map(|s| parse_memory_id(s))

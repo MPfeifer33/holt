@@ -99,9 +99,11 @@ impl Tool for CrystallizeTool {
             });
         }
 
-        // Call bridge crystallize tool via bridge client
+        // Crystallize as the calling agent, so the concept is written to the
+        // caller's own memory space.
+        let agent_ns = crate::memory::MemoryEngine::agent_namespace(&context.agent_id);
         let result = engine
-            .bridge_crystallize(summary, &source_ids, &context.agent_id, &tags)
+            .bridge_crystallize(summary, &source_ids, &agent_ns, &tags)
             .await
             .map_err(|e| ToolError {
                 code: ToolErrorCode::InternalError,
@@ -109,21 +111,18 @@ impl Tool for CrystallizeTool {
                 retryable: true,
             })?;
 
-        // C.4: Demote source memories to cold tier after successful crystallization.
-        // The crystallized concept carries the distilled knowledge; source episodes
-        // should decay naturally rather than competing for hot/warm slots.
-        let agent_ns = crate::memory::MemoryEngine::agent_namespace(&context.agent_id);
-        let mut demoted = 0usize;
-        for src_id in &source_ids {
-            if engine.set_tier(src_id, &agent_ns, "cold").await.is_ok() {
-                demoted += 1;
-            }
-        }
+        // The engine supersedes the sources: they stay stored and leave
+        // default recall. Report what it did, nothing more.
+        let superseded = result
+            .get("superseded")
+            .and_then(|s| s.as_array())
+            .map(|s| s.len())
+            .unwrap_or(0);
 
         Ok(ToolResult {
             content: json!({
                 "crystallized": result,
-                "sources_demoted_to_cold": demoted,
+                "sources_superseded": superseded,
                 "total_sources": source_ids.len(),
             }),
             truncated: false,

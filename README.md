@@ -24,7 +24,7 @@ the right. Not every task is a coding task.*
 
 ```bash
 git clone https://github.com/MPfeifer33/holt && cd holt
-cargo test --manifest-path app/src-tauri/Cargo.toml   # 865 backend tests, ~1 min
+cargo test --manifest-path app/src-tauri/Cargo.toml   # 942 backend tests, ~1 min
 npm install && npm run tauri dev                        # the desktop app
 ```
 
@@ -127,8 +127,8 @@ initial public release notes are already there.
 
 ## Status
 
-Research harness, cut 2026-08, security fixes landed 2026-09-28. Backend
-tests green (865). The public cut is live and the architecture chapters are
+Research harness, cut 2026-08, security fixes landed 2026-09-28, provider
+and memory staleness pass 2026-11-13. Backend tests green (942). The public cut is live and the architecture chapters are
 written. Holt is an exhibit —
 what you see is what it is; rough edges and all are part of the display.
 
