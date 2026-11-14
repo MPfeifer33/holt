@@ -953,6 +953,19 @@ async fn handle_typed_event(
         TypedCodexEvent::TurnCompleted(n) => {
             let completed_id = n.turn.get("id").and_then(|v| v.as_str());
             if is_our_turn(completed_id) {
+                // `turn/completed` also closes failed turns. Without reading
+                // the status, a failed turn ended as a successful empty reply.
+                // `interrupted` stays a normal completion: a user cancel has
+                // already returned `Interrupted` via the cancellation token.
+                if let Some(error) = n.failure() {
+                    tracing::warn!(
+                        agent_id,
+                        message = %error.message,
+                        codex_error_info = ?error.codex_error_info,
+                        "Codex turn completed with status failed"
+                    );
+                    return Err(classify_codex_event_error(&error.message));
+                }
                 return Ok(EventAction::TurnComplete);
             }
             tracing::debug!(
@@ -1855,6 +1868,113 @@ mod tests {
         });
         let action = handle_typed_event(
             ours,
+            "agent-1",
+            "t_1",
+            &mut final_response,
+            &mut current_turn_id,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(action, EventAction::TurnComplete));
+    }
+
+    #[tokio::test]
+    async fn failed_turn_completed_ends_the_turn_as_an_error() {
+        // turn/completed with status "failed" used to be accepted as a normal
+        // completion, so a failed turn looked like a successful empty reply.
+        let mut final_response = String::new();
+        let mut current_turn_id = Some("our-turn".to_string());
+
+        let failed = TypedCodexEvent::TurnCompleted(TurnCompletedNotification {
+            thread_id: "t_1".to_string(),
+            turn: serde_json::json!({
+                "id": "our-turn",
+                "items": [],
+                "status": "failed",
+                "error": {
+                    "message": "session budget exhausted",
+                    "codexErrorInfo": "sessionBudgetExceeded"
+                }
+            }),
+        });
+        let result = handle_typed_event(
+            failed,
+            "agent-1",
+            "t_1",
+            &mut final_response,
+            &mut current_turn_id,
+            None,
+        )
+        .await;
+        match result {
+            Err(CodexExecutorError::Execution(message)) => {
+                assert_eq!(message, "session budget exhausted")
+            }
+            Err(other) => panic!("expected Execution error, got {other:?}"),
+            Ok(_) => panic!("a failed turn must not complete normally"),
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_turn_completed_without_error_detail_is_still_an_error() {
+        let mut final_response = String::new();
+        let mut current_turn_id = Some("our-turn".to_string());
+
+        let failed = TypedCodexEvent::TurnCompleted(TurnCompletedNotification {
+            thread_id: "t_1".to_string(),
+            turn: serde_json::json!({ "id": "our-turn", "items": [], "status": "failed" }),
+        });
+        let result = handle_typed_event(
+            failed,
+            "agent-1",
+            "t_1",
+            &mut final_response,
+            &mut current_turn_id,
+            None,
+        )
+        .await;
+        assert!(matches!(result, Err(CodexExecutorError::Execution(_))));
+    }
+
+    #[tokio::test]
+    async fn foreign_failed_turn_does_not_fail_our_turn() {
+        let mut final_response = String::new();
+        let mut current_turn_id = Some("our-turn".to_string());
+
+        let foreign = TypedCodexEvent::TurnCompleted(TurnCompletedNotification {
+            thread_id: "t_1".to_string(),
+            turn: serde_json::json!({
+                "id": "compaction-turn",
+                "items": [],
+                "status": "failed",
+                "error": { "message": "compaction failed" }
+            }),
+        });
+        let action = handle_typed_event(
+            foreign,
+            "agent-1",
+            "t_1",
+            &mut final_response,
+            &mut current_turn_id,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(action, EventAction::Continue));
+    }
+
+    #[tokio::test]
+    async fn interrupted_turn_completed_still_completes_normally() {
+        let mut final_response = String::new();
+        let mut current_turn_id = Some("our-turn".to_string());
+
+        let interrupted = TypedCodexEvent::TurnCompleted(TurnCompletedNotification {
+            thread_id: "t_1".to_string(),
+            turn: serde_json::json!({ "id": "our-turn", "items": [], "status": "interrupted" }),
+        });
+        let action = handle_typed_event(
+            interrupted,
             "agent-1",
             "t_1",
             &mut final_response,

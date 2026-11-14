@@ -610,7 +610,7 @@
 
       if (command.id === 'effort') {
         if (!argumentText) {
-          addLocalMessage('Usage: /effort <low|medium|high>');
+          addLocalMessage('Usage: /effort <minimal|low|medium|high|xhigh|max>');
           return true;
         }
         const { codexSetEffort } = await import('$lib/tauri/commands');
@@ -621,7 +621,7 @@
 
       if (command.id === 'approval') {
         if (!argumentText) {
-          addLocalMessage('Usage: /approval <never|on-failure|on-request|untrusted>');
+          addLocalMessage('Usage: /approval <never|on-request|untrusted>');
           return true;
         }
         const { codexSetApproval } = await import('$lib/tauri/commands');

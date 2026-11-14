@@ -829,6 +829,26 @@ mod tests {
     }
 
     #[test]
+    fn error_with_unknown_code_still_parses_as_error() {
+        // A code newer than our types must not downgrade the notification to
+        // Unknown — Unknown is dropped, and the turn then looks like an empty
+        // success.
+        let params = json!({
+            "threadId": "t_1",
+            "turnId": "turn_1",
+            "error": {
+                "message": "Model not found",
+                "codexErrorInfo": "modelNotFound"
+            },
+            "willRetry": false
+        });
+        match parse_notification("error", params) {
+            TypedCodexEvent::Error(n) => assert_eq!(n.error.message, "Model not found"),
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn plan_updated_maps_to_thinking() {
         let event = TypedCodexEvent::TurnPlanUpdated(TurnPlanUpdatedNotification {
             thread_id: "t_1".to_string(),

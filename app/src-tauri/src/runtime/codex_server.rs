@@ -78,6 +78,31 @@ pub enum CodexServerError {
 
     #[error("Response channel closed for request {0}")]
     ResponseChannelClosed(u64),
+
+    #[error("Cannot roll back: {0}")]
+    Rollback(String),
+}
+
+impl CodexServerError {
+    /// Whether the server answered that it does not know `method` at all —
+    /// the signal to fall back to another method across Codex versions.
+    ///
+    /// Codex does not use JSON-RPC's -32601 for this: an unknown method fails
+    /// to deserialize as a request and comes back as -32600 "Invalid request:
+    /// unknown variant `<method>`, expected one of ..." (observed on 0.148.0).
+    /// -32600 alone is not enough — "thread not found" shares the code — so
+    /// the method must be named as the unknown variant. -32601 is accepted as
+    /// well in case a later server adopts the standard code.
+    pub fn is_unknown_method(&self, method: &str) -> bool {
+        match self {
+            Self::JsonRpc { code: -32601, .. } => true,
+            Self::JsonRpc {
+                code: -32600,
+                message,
+            } => message.contains(&format!("unknown variant `{method}`")),
+            _ => false,
+        }
+    }
 }
 
 // =============================================================================
@@ -868,6 +893,42 @@ async fn cleanup_handle(handle: &mut CodexServerHandle) -> Result<(), CodexServe
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn unknown_method_is_recognized_in_the_shape_codex_sends() {
+        // Verbatim (truncated) from codex-cli 0.148.0: an unknown method fails
+        // request deserialization and comes back as -32600, not -32601.
+        let err = CodexServerError::JsonRpc {
+            code: -32600,
+            message: "Invalid request: unknown variant `thread/rollback`, expected one of \
+                      `initialize`, `server/diagnostics`, `thread/start`"
+                .to_string(),
+        };
+        assert!(err.is_unknown_method("thread/rollback"));
+        // ...but only for the method that was actually unknown.
+        assert!(!err.is_unknown_method("thread/revert"));
+    }
+
+    #[test]
+    fn unknown_method_is_recognized_as_standard_method_not_found() {
+        let err = CodexServerError::JsonRpc {
+            code: -32601,
+            message: "Method not found".to_string(),
+        };
+        assert!(err.is_unknown_method("thread/rollback"));
+    }
+
+    #[test]
+    fn other_invalid_requests_are_not_unknown_methods() {
+        // Same -32600 code, also verbatim from 0.148.0 — a real failure that
+        // must never trigger a fallback.
+        let not_found = CodexServerError::JsonRpc {
+            code: -32600,
+            message: "thread not found: 019a0000-0000-7000-8000-000000000000".to_string(),
+        };
+        assert!(!not_found.is_unknown_method("thread/rollback"));
+        assert!(!CodexServerError::RequestTimeout(7).is_unknown_method("thread/rollback"));
+    }
 
     #[test]
     fn request_id_increments() {

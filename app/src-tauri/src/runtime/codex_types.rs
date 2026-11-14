@@ -240,6 +240,58 @@ pub struct ThreadRollbackParams {
     pub num_turns: u32,
 }
 
+/// Parameters for `thread/revert` — the successor of `thread/rollback`
+/// (experimental in 0.148, the only option from 0.156 on).
+///
+/// Drops `before_turn_id` and every later turn from the thread's history.
+/// Like rollback, it does NOT revert local file changes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadRevertParams {
+    pub thread_id: String,
+    pub before_turn_id: String,
+}
+
+/// Parameters for `thread/turns/list`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadTurnsListParams {
+    pub thread_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sort_direction: Option<SortDirection>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub items_view: Option<TurnItemsView>,
+}
+
+/// How much item detail `thread/turns/list` loads per turn.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum TurnItemsView {
+    NotLoaded,
+    Summary,
+    Full,
+}
+
+/// Response of `thread/turns/list` — one page of turns.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadTurnsListResponse {
+    pub data: Vec<TurnRef>,
+    /// Cursor for the next page; `None` when there are no more turns.
+    #[serde(default)]
+    pub next_cursor: Option<String>,
+}
+
+/// The part of a listed `Turn` the lane reads: its identity.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TurnRef {
+    pub id: String,
+}
+
 /// Parameters for `thread/settings/update`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -514,6 +566,29 @@ pub struct TurnPlanUpdatedNotification {
 pub struct TurnCompletedNotification {
     pub thread_id: String,
     pub turn: Value, // Full Turn object
+}
+
+impl TurnCompletedNotification {
+    /// The error of a turn that ended with status `failed`, or `None` for any
+    /// other status (`completed`, `interrupted`, `inProgress`).
+    ///
+    /// `turn.error` is "only populated when the Turn's status is failed", but
+    /// the schema allows it to be null even then — a failed turn without a
+    /// usable error still reports as failed, with a stand-in message.
+    pub fn failure(&self) -> Option<TurnError> {
+        if self.turn.get("status").and_then(Value::as_str) != Some("failed") {
+            return None;
+        }
+        let reported = self
+            .turn
+            .get("error")
+            .and_then(|error| serde_json::from_value::<TurnError>(error.clone()).ok());
+        Some(reported.unwrap_or_else(|| TurnError {
+            message: "Codex reported the turn as failed without an error message".to_string(),
+            additional_details: None,
+            codex_error_info: None,
+        }))
+    }
 }
 
 /// Token usage update — real counts per turn + cumulative.
@@ -813,12 +888,14 @@ pub struct ThreadNameUpdatedNotification {
 // Enums — Codex V2 protocol values
 // ============================================================================
 
-/// Approval policy for a thread or turn.
+/// Approval policy for a thread or turn (`AskForApproval` in the protocol).
+///
+/// `on-failure` existed in older protocol versions and was removed; current
+/// servers reject it, so it has no variant here.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 pub enum ApprovalPolicy {
     Untrusted,
-    OnFailure,
     OnRequest,
     Never,
 }
@@ -984,24 +1061,103 @@ pub enum PlanType {
 }
 
 /// Codex error info — classified error from the upstream API.
+///
+/// On the wire this is either a bare string (`"contextWindowExceeded"`) or a
+/// single-key object whose key is the code (`{"httpConnectionFailed":
+/// {"httpStatusCode": 502}}`). Named variants follow the codex 0.148 schema.
+///
+/// Deserialization never fails: Codex adds codes in most releases, and a code
+/// we don't know must not cost us the error notification that carries it.
+/// Anything unrecognized lands in [`CodexErrorInfo::Unrecognized`] with the
+/// code's name preserved.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(from = "Value")]
 pub enum CodexErrorInfo {
     ContextWindowExceeded,
+    SessionBudgetExceeded,
     UsageLimitExceeded,
     ServerOverloaded,
     CyberPolicy,
+    MisalignmentPolicyViolation,
     InternalServerError,
     Unauthorized,
     BadRequest,
     ThreadRollbackFailed,
     SandboxError,
     Other,
-    // Complex variants with HTTP status codes — deserialize as untagged
-    #[serde(untagged)]
     HttpConnectionFailed {
         http_status_code: Option<u16>,
     },
+    /// Failed to connect to the response SSE stream.
+    ResponseStreamConnectionFailed {
+        http_status_code: Option<u16>,
+    },
+    /// The response SSE stream disconnected mid-turn.
+    ResponseStreamDisconnected {
+        http_status_code: Option<u16>,
+    },
+    /// Reached the retry limit for responses.
+    ResponseTooManyFailedAttempts {
+        http_status_code: Option<u16>,
+    },
+    /// `turn/start` or `turn/steer` hit a turn that can't be steered
+    /// (e.g. `/review`, manual `/compact`).
+    ActiveTurnNotSteerable,
+    /// A code these types don't name (newer Codex). `code` is the wire name;
+    /// for a shape that is neither a string nor a single-key object it is the
+    /// raw JSON.
+    Unrecognized {
+        code: String,
+    },
+}
+
+impl From<Value> for CodexErrorInfo {
+    fn from(wire: Value) -> Self {
+        let named = match &wire {
+            Value::String(code) => Some((code.as_str(), None)),
+            Value::Object(fields) if fields.len() == 1 => fields
+                .iter()
+                .next()
+                .map(|(code, detail)| (code.as_str(), Some(detail))),
+            _ => None,
+        };
+        let Some((code, detail)) = named else {
+            return Self::Unrecognized {
+                code: wire.to_string(),
+            };
+        };
+        let http_status_code = detail
+            .and_then(|detail| detail.get("httpStatusCode"))
+            .and_then(Value::as_u64)
+            .and_then(|status| u16::try_from(status).ok());
+
+        match code {
+            "contextWindowExceeded" => Self::ContextWindowExceeded,
+            "sessionBudgetExceeded" => Self::SessionBudgetExceeded,
+            "usageLimitExceeded" => Self::UsageLimitExceeded,
+            "serverOverloaded" => Self::ServerOverloaded,
+            "cyberPolicy" => Self::CyberPolicy,
+            "misalignmentPolicyViolation" => Self::MisalignmentPolicyViolation,
+            "internalServerError" => Self::InternalServerError,
+            "unauthorized" => Self::Unauthorized,
+            "badRequest" => Self::BadRequest,
+            "threadRollbackFailed" => Self::ThreadRollbackFailed,
+            "sandboxError" => Self::SandboxError,
+            "other" => Self::Other,
+            "httpConnectionFailed" => Self::HttpConnectionFailed { http_status_code },
+            "responseStreamConnectionFailed" => {
+                Self::ResponseStreamConnectionFailed { http_status_code }
+            }
+            "responseStreamDisconnected" => Self::ResponseStreamDisconnected { http_status_code },
+            "responseTooManyFailedAttempts" => {
+                Self::ResponseTooManyFailedAttempts { http_status_code }
+            }
+            "activeTurnNotSteerable" => Self::ActiveTurnNotSteerable,
+            _ => Self::Unrecognized {
+                code: code.to_string(),
+            },
+        }
+    }
 }
 
 /// Guardian approval review status.
@@ -1331,6 +1487,125 @@ mod tests {
     }
 
     #[test]
+    fn error_notification_with_unknown_string_code_deserializes() {
+        // `rateLimitExceeded` arrived after these types were written (0.167.x).
+        // An unknown code must not fail the whole notification — that turned
+        // a failed turn into a silently dropped event.
+        let json = json!({
+            "threadId": "t_1",
+            "turnId": "turn_1",
+            "error": {
+                "message": "Rate limit exceeded",
+                "codexErrorInfo": "rateLimitExceeded"
+            },
+            "willRetry": false
+        });
+        let notif: ErrorNotification = serde_json::from_value(json).unwrap();
+        assert_eq!(notif.error.message, "Rate limit exceeded");
+    }
+
+    #[test]
+    fn codex_error_info_http_connection_failed_keeps_status_code() {
+        let info: CodexErrorInfo =
+            serde_json::from_value(json!({ "httpConnectionFailed": { "httpStatusCode": 502 } }))
+                .unwrap();
+        assert_eq!(
+            info,
+            CodexErrorInfo::HttpConnectionFailed {
+                http_status_code: Some(502)
+            }
+        );
+    }
+
+    #[test]
+    fn codex_error_info_keeps_the_name_of_unknown_codes() {
+        // String-shaped: every code added between 0.148 and 0.167.2.
+        for code in [
+            "rateLimitExceeded",
+            "modelNotFound",
+            "flexUnavailable",
+            "policyCapacityUnavailable",
+            "tooManyDenials",
+        ] {
+            let info: CodexErrorInfo = serde_json::from_value(json!(code)).unwrap();
+            assert_eq!(
+                info,
+                CodexErrorInfo::Unrecognized {
+                    code: code.to_string()
+                }
+            );
+        }
+
+        // Object-shaped: the single key is the code.
+        let info: CodexErrorInfo =
+            serde_json::from_value(json!({ "somethingNew": { "detail": 1 } })).unwrap();
+        assert_eq!(
+            info,
+            CodexErrorInfo::Unrecognized {
+                code: "somethingNew".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn codex_error_info_names_the_codes_of_the_0_148_schema() {
+        let parse = |wire: Value| serde_json::from_value::<CodexErrorInfo>(wire).unwrap();
+        assert_eq!(
+            parse(json!("sessionBudgetExceeded")),
+            CodexErrorInfo::SessionBudgetExceeded
+        );
+        assert_eq!(
+            parse(json!("misalignmentPolicyViolation")),
+            CodexErrorInfo::MisalignmentPolicyViolation
+        );
+        assert_eq!(
+            parse(json!({ "responseStreamConnectionFailed": { "httpStatusCode": 503 } })),
+            CodexErrorInfo::ResponseStreamConnectionFailed {
+                http_status_code: Some(503)
+            }
+        );
+        assert_eq!(
+            parse(json!({ "responseTooManyFailedAttempts": { "httpStatusCode": null } })),
+            CodexErrorInfo::ResponseTooManyFailedAttempts {
+                http_status_code: None
+            }
+        );
+        assert_eq!(
+            parse(json!({ "activeTurnNotSteerable": { "turnKind": "review" } })),
+            CodexErrorInfo::ActiveTurnNotSteerable
+        );
+    }
+
+    #[test]
+    fn turn_error_with_unknown_object_code_deserializes() {
+        let error: TurnError = serde_json::from_value(json!({
+            "message": "boom",
+            "codexErrorInfo": { "somethingNew": {} },
+            "misalignment": null
+        }))
+        .unwrap();
+        assert_eq!(error.message, "boom");
+        assert_eq!(
+            error.codex_error_info,
+            Some(CodexErrorInfo::Unrecognized {
+                code: "somethingNew".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn codex_error_info_object_variants_are_not_all_http_connection_failed() {
+        let info: CodexErrorInfo = serde_json::from_value(
+            json!({ "responseStreamDisconnected": { "httpStatusCode": null } }),
+        )
+        .unwrap();
+        assert!(
+            !matches!(info, CodexErrorInfo::HttpConnectionFailed { .. }),
+            "got {info:?}"
+        );
+    }
+
+    #[test]
     fn goal_updated_deserializes() {
         let json = json!({
             "threadId": "t_1",
@@ -1444,8 +1719,12 @@ mod tests {
             "never"
         );
         assert_eq!(
-            serde_json::to_value(ApprovalPolicy::OnFailure).unwrap(),
-            "on-failure"
+            serde_json::to_value(ApprovalPolicy::OnRequest).unwrap(),
+            "on-request"
+        );
+        assert_eq!(
+            serde_json::to_value(ApprovalPolicy::Untrusted).unwrap(),
+            "untrusted"
         );
     }
 

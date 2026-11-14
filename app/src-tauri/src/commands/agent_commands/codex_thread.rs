@@ -36,6 +36,49 @@ async fn get_thread_id(state: &AppState, agent_id: &str) -> Result<String, Comma
         .ok_or_else(|| CommandError::internal("No active thread — send a message first"))
 }
 
+/// Reasoning efforts Codex models advertise. The protocol's `ReasoningEffort`
+/// is a free non-empty string and each model accepts its own subset, so the
+/// server has the final say; this list only keeps typos from reaching it.
+const REASONING_EFFORTS: [&str; 7] = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
+
+/// Approval policies the protocol accepts as plain strings (`AskForApproval`).
+/// `on-failure` was removed from the protocol and is rejected by the server.
+const APPROVAL_POLICIES: &str = "never, on-request, untrusted";
+
+/// Map what the user typed after `/effort` to a protocol reasoning effort.
+fn parse_reasoning_effort(level: &str) -> Result<&'static str, CommandError> {
+    let typed = level.trim().to_lowercase();
+    let wanted = if typed == "med" {
+        "medium"
+    } else {
+        typed.as_str()
+    };
+    REASONING_EFFORTS
+        .into_iter()
+        .find(|effort| *effort == wanted)
+        .ok_or_else(|| {
+            CommandError::internal(format!(
+                "Invalid effort level. Use: {}",
+                REASONING_EFFORTS.join(", ")
+            ))
+        })
+}
+
+/// Map what the user typed after `/approval` to a protocol approval policy.
+fn parse_approval_policy(policy: &str) -> Result<ApprovalPolicy, CommandError> {
+    match policy.trim().to_lowercase().as_str() {
+        "never" | "none" => Ok(ApprovalPolicy::Never),
+        "on-request" | "onrequest" | "request" => Ok(ApprovalPolicy::OnRequest),
+        "untrusted" | "always" | "all" => Ok(ApprovalPolicy::Untrusted),
+        "on-failure" | "onfailure" | "failure" => Err(CommandError::internal(format!(
+            "The on-failure policy is no longer supported by Codex. Use: {APPROVAL_POLICIES}"
+        ))),
+        _ => Err(CommandError::internal(format!(
+            "Invalid policy. Use: {APPROVAL_POLICIES}"
+        ))),
+    }
+}
+
 #[tauri::command]
 pub async fn codex_switch_model(
     state: State<'_, Arc<AppState>>,
@@ -65,16 +108,7 @@ pub async fn codex_set_effort(
 ) -> Result<String, CommandError> {
     let thread_id = get_thread_id(&state, &agent_id).await?;
 
-    let effort = match level.to_lowercase().as_str() {
-        "low" => "low".to_string(),
-        "medium" | "med" => "medium".to_string(),
-        "high" => "high".to_string(),
-        _ => {
-            return Err(CommandError::internal(
-                "Invalid effort level. Use: low, medium, high",
-            ))
-        }
-    };
+    let effort = parse_reasoning_effort(&level)?.to_string();
 
     codex_thread_ops::thread_settings_update(
         &agent_id,
@@ -87,7 +121,7 @@ pub async fn codex_set_effort(
     .await
     .map_err(|e| CommandError::internal(format!("Failed to set effort: {e}")))?;
 
-    Ok(format!("Reasoning effort set to {level}"))
+    Ok(format!("Reasoning effort set to {effort}"))
 }
 
 #[tauri::command]
@@ -98,17 +132,7 @@ pub async fn codex_set_approval(
 ) -> Result<String, CommandError> {
     let thread_id = get_thread_id(&state, &agent_id).await?;
 
-    let approval = match policy.to_lowercase().as_str() {
-        "never" | "none" => ApprovalPolicy::Never,
-        "on-failure" | "onfailure" | "failure" => ApprovalPolicy::OnFailure,
-        "on-request" | "onrequest" | "request" => ApprovalPolicy::OnRequest,
-        "untrusted" | "always" | "all" => ApprovalPolicy::Untrusted,
-        _ => {
-            return Err(CommandError::internal(
-                "Invalid policy. Use: never, on-failure, on-request, untrusted",
-            ))
-        }
-    };
+    let approval = parse_approval_policy(&policy)?;
 
     codex_thread_ops::thread_settings_update(
         &agent_id,
@@ -219,4 +243,77 @@ pub async fn codex_shell_command(
         .map_err(|e| CommandError::internal(format!("Shell command failed: {e}")))?;
 
     Ok(serde_json::to_string_pretty(&result).unwrap_or_else(|_| "Command executed".to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reasoning_effort_accepts_every_level_models_advertise() {
+        for level in ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"] {
+            assert_eq!(parse_reasoning_effort(level).unwrap(), level);
+        }
+    }
+
+    #[test]
+    fn reasoning_effort_is_case_insensitive_and_trims() {
+        assert_eq!(parse_reasoning_effort(" XHigh ").unwrap(), "xhigh");
+        assert_eq!(parse_reasoning_effort("med").unwrap(), "medium");
+    }
+
+    #[test]
+    fn reasoning_effort_rejects_empty_and_garbage_listing_valid_levels() {
+        for level in ["", "   ", "turbo", "high!"] {
+            let err = parse_reasoning_effort(level).unwrap_err();
+            assert!(
+                err.message
+                    .contains("minimal, low, medium, high, xhigh, max, ultra"),
+                "message for {level:?} was: {}",
+                err.message
+            );
+        }
+    }
+
+    #[test]
+    fn approval_policy_accepts_the_protocol_values() {
+        assert_eq!(
+            parse_approval_policy("never").unwrap(),
+            ApprovalPolicy::Never
+        );
+        assert_eq!(
+            parse_approval_policy("On-Request").unwrap(),
+            ApprovalPolicy::OnRequest
+        );
+        assert_eq!(
+            parse_approval_policy("untrusted").unwrap(),
+            ApprovalPolicy::Untrusted
+        );
+    }
+
+    #[test]
+    fn approval_policy_on_failure_is_rejected_naming_valid_values() {
+        // `on-failure` left the protocol (AskForApproval is now
+        // untrusted | on-request | never); the server rejects it.
+        for typed in ["on-failure", "onfailure", "failure"] {
+            let err = parse_approval_policy(typed).unwrap_err();
+            assert!(
+                err.message.contains("no longer supported"),
+                "message for {typed:?} was: {}",
+                err.message
+            );
+            assert!(
+                err.message.contains("never, on-request, untrusted"),
+                "message for {typed:?} was: {}",
+                err.message
+            );
+        }
+    }
+
+    #[test]
+    fn approval_policy_garbage_lists_only_valid_values() {
+        let err = parse_approval_policy("sometimes").unwrap_err();
+        assert!(err.message.contains("never, on-request, untrusted"));
+        assert!(!err.message.contains("on-failure"));
+    }
 }
