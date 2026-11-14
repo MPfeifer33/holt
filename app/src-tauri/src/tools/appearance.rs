@@ -74,7 +74,7 @@ impl Tool for CustomizeAppearanceTool {
                 },
                 "avatar": {
                     "type": "string",
-                    "description": "Emoji shown on your node and window header (e.g., '🦊')"
+                    "description": "Emoji shown on your node and window header (e.g., '🧭')"
                 },
                 "display_name": {
                     "type": "string",

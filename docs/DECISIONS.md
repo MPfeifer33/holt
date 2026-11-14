@@ -3,19 +3,19 @@
 Every consequential call in the public cut, with rationale. Amended as
 decisions land; nothing here is retroactively rewritten.
 
-Per Mark's directive 2026-08-08: judgment calls on the lanes for the public
+Per the maintainer's directive 2026-08-08: judgment calls on the lanes for the public
 research-harness cut, documented with rationale. Each entry: KEEP / GENERALIZE / EXCLUDE
 + why + what innovation (if any) goes on the discuss-later ledger.
 
 ## Lanes
 
-1. **Nix bootstrap slot** (lib.rs ~230: protected OAuth/SDK lane, persona
+1. **Primary-agent bootstrap slot** (lib.rs ~230: protected OAuth/SDK lane, persona
    system prompt, hardcoded identity) — **GENERALIZE**: replace with a
    config-driven "primary agent" example lane, generic system prompt,
    `protected` demoted to a config flag. A research harness ships mechanisms,
    not residents. *Discuss-later:* the bootstrap-slot pattern itself
    (app-owned protected lane) is clean and worth documenting as a feature.
-2. **nix-tui slot** (lib.rs ~454: Local:0 externally-driven placeholder
+2. **Externally-driven terminal slot** (lib.rs ~454: Local:0 externally-driven placeholder
    lane) — **GENERALIZE + DOCUMENT**: the "externally-driven lane" concept
    (an agent whose turns come from outside the app) is genuinely novel
    research-harness material — rename to `external-lane` example, keep the

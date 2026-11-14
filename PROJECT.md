@@ -90,3 +90,5 @@ npm run check              # frontend type/lint check
 ## Last Updated
 
 2026-10-01 — README hero screenshot added (`docs/images/holt-canvas.png`): the private system's canvas and a live lane, captioned as such.
+
+2026-11-13 — That screenshot was removed: it showed the private system's agents by name. The public tree now names no agent of the private system; a screenshot of Holt itself can take its place.

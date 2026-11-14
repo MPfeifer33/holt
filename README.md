@@ -17,11 +17,6 @@ A holt is a den. The code is what lives in it.
 
 ## See It, Run It
 
-![The canvas: seven agents, one working, and a live lane mid-conversation](docs/images/holt-canvas.png)
-
-*The private system Holt was cut from, in daily use: the agent canvas on the left, one lane open on
-the right. Not every task is a coding task.*
-
 ```bash
 git clone https://github.com/MPfeifer33/holt && cd holt
 cargo test --manifest-path app/src-tauri/Cargo.toml   # 942 backend tests, ~1 min
